@@ -1,7 +1,22 @@
-import { User } from "../models/user.model.js";
-import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
+import { getDb } from "../db/client.js";
+import { users } from "../db/schema.js";
+import { eq } from "drizzle-orm";
+
+const db = () => getDb();
+
+const sanitizeUser = (userRecord) => {
+  if (!userRecord) {
+    return null;
+  }
+
+  const { password, ...rest } = userRecord;
+  return {
+    ...rest,
+    _id: userRecord.id,
+  };
+};
 
 export const registerHandler = async (req, res) => {
   try {
@@ -12,7 +27,12 @@ export const registerHandler = async (req, res) => {
         .json({ success: false, message: "invalid credentials" });
     }
 
-    const existedUser = await User.findOne({ email });
+    const [existedUser] = await db()
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
     if (existedUser) {
       return res
         .status(400)
@@ -21,9 +41,12 @@ export const registerHandler = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = await User.create({ name, email, password: hashedPassword });
+    const [createdUser] = await db()
+      .insert(users)
+      .values({ name, email, password: hashedPassword })
+      .returning();
 
-    const token = jwt.sign({ id: user._id }, process.env.ACCESS_TOKEN_SECRET, {
+    const token = jwt.sign({ id: createdUser.id }, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "7d",
     });
 
@@ -37,8 +60,10 @@ export const registerHandler = async (req, res) => {
     return res.status(201).json({
       success: true,
       user: {
-        name: user.name,
-        email: user.email,
+        name: createdUser.name,
+        email: createdUser.email,
+        _id: createdUser.id,
+        id: createdUser.id,
       },
       message: "User registered successfully",
     });
@@ -57,7 +82,11 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Email and Password required" });
     }
 
-    const user = await User.findOne({ email });
+    const [user] = await db()
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
 
     if (!user) {
       return res
@@ -72,7 +101,7 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Password does not matched" });
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.ACCESS_TOKEN_SECRET, {
+    const token = jwt.sign({ id: user.id }, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "7d",
     });
 
@@ -88,6 +117,8 @@ export const loginHandler = async (req, res) => {
       user: {
         name: user.name,
         email: user.email,
+        _id: user.id,
+        id: user.id,
       },
       message: "User LoggedIn successfully",
     });
@@ -99,9 +130,13 @@ export const loginHandler = async (req, res) => {
 
 export const isAuth = async (req, res) => {
   try {
-    // const { userId } = req.body;
-    const user = await User.findById(req.user).select("-password");
-    return res.status(200).json({ success: true, user });
+    const [user] = await db()
+      .select()
+      .from(users)
+      .where(eq(users.id, req.user))
+      .limit(1);
+
+    return res.status(200).json({ success: true, user: sanitizeUser(user) });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });

@@ -1,5 +1,5 @@
 import { app } from "./app.js";
-import { connectDb,  } from "./config/db.js";
+import { connectDb } from "./config/db.js";
 import dotenv from "dotenv";
 import { connectCloudinary } from "./utils/cdn.cloudinary.js";
 

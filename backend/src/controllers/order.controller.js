@@ -1,7 +1,94 @@
-import { Order } from "../models/order.model.js";
-import { Product } from "../models/product.model.js";
 import stripe from "stripe";
-import { User } from "../models/user.model.js";
+import { getDb } from "../db/client.js";
+import {
+  orders,
+  orderItems,
+  products,
+  addresses,
+  users,
+} from "../db/schema.js";
+import { eq, inArray, and, or, desc } from "drizzle-orm";
+
+const db = () => getDb();
+
+const buildProductsMap = async (productIds) => {
+  if (!productIds.length) {
+    return new Map();
+  }
+
+  const rows = await db()
+    .select()
+    .from(products)
+    .where(inArray(products.id, productIds));
+
+  return new Map(
+    rows.map((item) => [item.id, { ...item, _id: item.id }])
+  );
+};
+
+const attachOrderRelations = async (ordersList) => {
+  if (!ordersList.length) {
+    return [];
+  }
+
+  const orderIds = ordersList.map((order) => order.id);
+
+  const itemsRows = await db()
+    .select()
+    .from(orderItems)
+    .where(inArray(orderItems.orderId, orderIds));
+
+  const addressesRows = await db()
+    .select()
+    .from(addresses)
+    .where(
+      inArray(
+        addresses.id,
+        Array.from(new Set(ordersList.map((order) => order.addressId)))
+      )
+    );
+
+  const productIds = Array.from(
+    new Set(itemsRows.map((item) => item.productId))
+  );
+
+  const productsRows = productIds.length
+    ? await db()
+        .select()
+        .from(products)
+        .where(inArray(products.id, productIds))
+    : [];
+
+  const addressMap = new Map(addressesRows.map((addr) => [addr.id, addr]));
+  const productMap = new Map(
+    productsRows.map((prod) => [prod.id, { ...prod, _id: prod.id }])
+  );
+  const itemsByOrder = new Map();
+
+  itemsRows.forEach((item) => {
+    const list = itemsByOrder.get(item.orderId) ?? [];
+    list.push({
+      ...item,
+      product: productMap.get(item.productId) ?? null,
+    });
+    itemsByOrder.set(item.orderId, list);
+  });
+
+  return ordersList.map((order) => ({
+    ...order,
+    address: addressMap.get(order.addressId)
+      ? {
+          ...addressMap.get(order.addressId),
+          _id: addressMap.get(order.addressId).id,
+        }
+      : null,
+    items: (itemsByOrder.get(order.id) ?? []).map((item) => ({
+      ...item,
+      _id: item.id,
+    })),
+    _id: order.id,
+  }));
+};
 
 export const placeOrderHandler = async (req, res) => {
   try {
@@ -11,14 +98,54 @@ export const placeOrderHandler = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid data" });
     }
 
-    let amount = await items.reduce(async (acc, item) => {
-      const product = await Product.findById(item.product);
-      return (await acc) + product.offerPrice * item.quantity;
+    const productIds = Array.from(new Set(items.map((item) => item.product)));
+
+    const productMap = await buildProductsMap(productIds);
+
+    if (productMap.size !== productIds.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "One or more products not found" });
+    }
+
+    const [shippingAddress] = await db()
+      .select()
+      .from(addresses)
+      .where(
+        and(eq(addresses.id, address), eq(addresses.userId, userId))
+      )
+      .limit(1);
+
+    if (!shippingAddress) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Address not found" });
+    }
+
+    const baseAmount = items.reduce((acc, item) => {
+      const product = productMap.get(item.product);
+      return acc + product.offerPrice * item.quantity;
     }, 0);
 
-    amount += Math.floor(amount * 0.02);
+    const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    await Order.create({ userId, items, amount, address, paymentType: "COD" });
+    const [newOrder] = await db()
+      .insert(orders)
+      .values({
+        userId,
+        amount,
+        addressId: shippingAddress.id,
+        paymentType: "COD",
+      })
+      .returning({ id: orders.id });
+
+    await db().insert(orderItems).values(
+      items.map((item) => ({
+        orderId: newOrder.id,
+        productId: item.product,
+        quantity: item.quantity,
+      }))
+    );
 
     return res
       .status(200)
@@ -38,27 +165,61 @@ export const placeOrderStripeHandler = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid data" });
     }
 
-    let productData = [];
+    const productIds = Array.from(new Set(items.map((item) => item.product)));
+    const productMap = await buildProductsMap(productIds);
 
-    let amount = await items.reduce(async (acc, item) => {
-      const product = await Product.findById(item.product);
+    if (productMap.size !== productIds.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "One or more products not found" });
+    }
+
+    const [shippingAddress] = await db()
+      .select()
+      .from(addresses)
+      .where(
+        and(eq(addresses.id, address), eq(addresses.userId, userId))
+      )
+      .limit(1);
+
+    if (!shippingAddress) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Address not found" });
+    }
+
+    const productData = [];
+
+    const baseAmount = items.reduce((acc, item) => {
+      const product = productMap.get(item.product);
       productData.push({
         name: product.name,
         price: product.offerPrice,
         quantity: item.quantity,
       });
-      return (await acc) + product.offerPrice * item.quantity;
+
+      return acc + product.offerPrice * item.quantity;
     }, 0);
 
-    amount += Math.floor(amount * 0.02);
+    const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    const order = await Order.create({
-      userId,
-      items,
-      amount,
-      address,
-      paymentType: "Online",
-    });
+    const [order] = await db()
+      .insert(orders)
+      .values({
+        userId,
+        amount,
+        addressId: shippingAddress.id,
+        paymentType: "Online",
+      })
+      .returning({ id: orders.id });
+
+    await db().insert(orderItems).values(
+      items.map((item) => ({
+        orderId: order.id,
+        productId: item.product,
+        quantity: item.quantity,
+      }))
+    );
 
     const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -81,7 +242,7 @@ export const placeOrderStripeHandler = async (req, res) => {
       success_url: `${origin}/loader?next=my-orders`,
       cancel_url: `${origin}/cart`,
       metadata: {
-        orderId: order._id.toString(),
+        orderId: order.id,
         userId,
       },
     });
@@ -120,8 +281,17 @@ export const stripeWebhook = async (req, res) => {
 
       if (session.data.length > 0) {
         const { orderId, userId } = session.data[0].metadata;
-        await Order.findByIdAndUpdate(orderId, { isPaid: true });
-        await User.findByIdAndUpdate(userId, { cartItems: {} });
+
+        await Promise.all([
+          db()
+            .update(orders)
+            .set({ isPaid: true, updatedAt: new Date() })
+            .where(eq(orders.id, orderId)),
+          db()
+            .update(users)
+            .set({ cartItems: {}, updatedAt: new Date() })
+            .where(eq(users.id, userId)),
+        ]);
       }
       break;
     }
@@ -137,14 +307,20 @@ export const stripeWebhook = async (req, res) => {
 export const getUserOrdersHandler = async (req, res) => {
   try {
     const userId = req.user;
-    const orders = await Order.find({
-      userId,
-      $or: [{ paymentType: "COD" }, { isPaid: true }],
-    })
-      .populate("items.product address")
-      .sort({ createdAt: -1 });
+    const orderList = await db()
+      .select()
+      .from(orders)
+      .where(
+        and(
+          eq(orders.userId, userId),
+          or(eq(orders.paymentType, "COD"), eq(orders.isPaid, true))
+        )
+      )
+      .orderBy(desc(orders.createdAt));
 
-    res.status(200).json({ success: true, orders });
+    const hydratedOrders = await attachOrderRelations(orderList);
+
+    res.status(200).json({ success: true, orders: hydratedOrders });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -154,13 +330,15 @@ export const getUserOrdersHandler = async (req, res) => {
 
 export const getAllOrdersHandler = async (req, res) => {
   try {
-    const orders = await Order.find({
-      $or: [{ paymentType: "COD" }, { isPaid: true }],
-    })
-      .populate("items.product address")
-      .sort({ createdAt: -1 });
+    const orderList = await db()
+      .select()
+      .from(orders)
+      .where(or(eq(orders.paymentType, "COD"), eq(orders.isPaid, true)))
+      .orderBy(desc(orders.createdAt));
 
-    return res.status(200).json({ success: true, orders });
+    const hydratedOrders = await attachOrderRelations(orderList);
+
+    return res.status(200).json({ success: true, orders: hydratedOrders });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }

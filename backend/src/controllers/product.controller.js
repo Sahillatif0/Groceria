@@ -1,6 +1,18 @@
-import { Product } from "../models/product.model.js";
 import { v2 as cloudinary } from "cloudinary";
-// import { uploadOnCloudinary } from "../utils/cdn.cloudinary.js";
+import { getDb } from "../db/client.js";
+import { products as productsTable } from "../db/schema.js";
+import { eq } from "drizzle-orm";
+import { isValidUuid } from "../utils/validators.js";
+
+const db = () => getDb();
+
+const formatProduct = (product) =>
+  product
+    ? {
+        ...product,
+        _id: product.id,
+      }
+    : null;
 
 export const addProductHandler = async (req, res) => {
   try {
@@ -14,14 +26,26 @@ export const addProductHandler = async (req, res) => {
       })
     );
 
-    await Product.create({
-      ...productData,
-      image: imagesUrl,
-    });
+    const [createdProduct] = await db()
+      .insert(productsTable)
+      .values({
+        name: productData.name,
+        description: productData.description,
+        price: productData.price,
+        offerPrice: productData.offerPrice,
+        image: imagesUrl,
+        category: productData.category,
+        inStock: productData?.inStock ?? true,
+      })
+      .returning();
 
     res
       .status(200)
-      .json({ success: true, message: "Product added successfully" });
+      .json({
+        success: true,
+        message: "Product added successfully",
+        product: formatProduct(createdProduct),
+      });
   } catch (error) {
     console.error("Error adding product:", error);
 
@@ -33,8 +57,11 @@ export const addProductHandler = async (req, res) => {
 };
 export const productListHandler = async (req, res) => {
   try {
-    const products = await Product.find({});
-    res.status(200).json({ success: true, products });
+    const products = await db().select().from(productsTable);
+    res.status(200).json({
+      success: true,
+      products: products.map(formatProduct),
+    });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });
@@ -45,8 +72,18 @@ export const productByIdtHandler = async (req, res) => {
   try {
     const { id } = req.body;
 
-    const product = await Product.findById(id);
-    res.status(200).json({ success: true, product });
+    if (!isValidUuid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+
+    const [product] = await db()
+      .select()
+      .from(productsTable)
+      .where(eq(productsTable.id, id))
+      .limit(1);
+    res.status(200).json({ success: true, product: formatProduct(product) });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });
@@ -56,7 +93,16 @@ export const updateProductHandler = async (req, res) => {
   try {
     const { id, inStock } = req.body;
 
-    await Product.findByIdAndUpdate(id, { inStock });
+    if (!isValidUuid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+
+    await db()
+      .update(productsTable)
+      .set({ inStock, updatedAt: new Date() })
+      .where(eq(productsTable.id, id));
     res.status(200).json({ success: true, message: "Stock updated" });
   } catch (error) {
     console.log(error.message);

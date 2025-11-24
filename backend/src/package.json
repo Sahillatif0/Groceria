@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "vercel-start": "node src/index.js"
+    "vercel-start": "node src/index.js",
+    "db:generate": "drizzle-kit generate --config drizzle.config.cjs",
+    "db:push": "drizzle-kit push --config drizzle.config.cjs"
   },
   "keywords": [],
   "author": "",
@@ -19,15 +21,17 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
+    "drizzle-orm": "^0.36.3",
     "express": "^5.1.0",
     "helmetjs": "^0.1.6",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.16.1",
     "morgan": "^1.10.0",
     "multer": "^2.0.1",
+    "pg": "^8.13.1",
     "stripe": "^18.3.0"
   },
   "devDependencies": {
+    "drizzle-kit": "^0.31.7",
     "nodemon": "^3.1.10"
   }
 }

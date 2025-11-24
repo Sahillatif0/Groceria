@@ -2,14 +2,13 @@ import express from "express";
 import morgan from "morgan";
 import cookieParser from "cookie-parser";
 import { configureCors } from "./config/corsConfig.js";
-import cors from "cors";
 export const app = express();
 
 const corsMiddleware = configureCors();
 
 // apply CORS before parsing incoming bodies so preflight requests are handled early
-// app.use(corsMiddleware);
-// app.options("*", corsMiddleware);
+app.use(corsMiddleware);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(express.static("public"));

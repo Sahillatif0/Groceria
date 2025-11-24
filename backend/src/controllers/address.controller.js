@@ -1,13 +1,25 @@
-import { Address } from "../models/address.model.js";
+import { addresses as addressesTable } from "../db/schema.js";
+import { getDb } from "../db/client.js";
+import { eq } from "drizzle-orm";
+
+const db = () => getDb();
 
 export const addAddressHandler = async (req, res) => {
   try {
     const userId = req.user; // Use authenticated user ID
     const { address } = req.body;
-    await Address.create({ ...address, userId });
+    const [createdAddress] = await db()
+      .insert(addressesTable)
+      .values({ ...address, userId })
+      .returning();
+
     res.status(200).json({
       success: true,
       message: "Address added successfully",
+      address: {
+        ...createdAddress,
+        _id: createdAddress.id,
+      },
     });
   } catch (error) {
     console.log(error.message);
@@ -18,8 +30,17 @@ export const addAddressHandler = async (req, res) => {
 export const getAddressHandler = async (req, res) => {
   try {
     const userId = req.user;
-    const addresses = await Address.find({ userId });
-    res.status(200).json({ success: true, addresses });
+    const userAddresses = await db()
+      .select()
+      .from(addressesTable)
+      .where(eq(addressesTable.userId, userId));
+
+    const formatted = userAddresses.map((item) => ({
+      ...item,
+      _id: item.id,
+    }));
+
+    res.status(200).json({ success: true, addresses: formatted });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });

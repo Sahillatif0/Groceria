@@ -46,7 +46,6 @@ export const AppContextProvider = ({ children }) => {
   };
 
   const fetchProducts = async () => {
-    setProducts(dummyProducts);
     try {
       const { data } = await axios.get("/api/product/list");
 
@@ -54,9 +53,11 @@ export const AppContextProvider = ({ children }) => {
         setProducts(data.products);
       } else {
         toast.error(data.message);
+        setProducts(dummyProducts);
       }
     } catch (error) {
       toast.error(error.message);
+      setProducts(dummyProducts);
     }
   };
 
