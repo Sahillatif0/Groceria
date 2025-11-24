@@ -13,10 +13,13 @@ export const AppContextProvider = ({ children }) => {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
   const [isSeller, setIsSeller] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [showUserLogin, setShowUserLogin] = useState(false);
   const [products, setProducts] = useState([]);
   const [cartItems, setCartItems] = useState({});
-  const [searchQuery, setSearchQuery] = useState({});
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sellerProfile, setSellerProfile] = useState(null);
+  const [sellerProducts, setSellerProducts] = useState([]);
 
   // fetching seller status
   const fetchSeller = async () => {
@@ -24,11 +27,19 @@ export const AppContextProvider = ({ children }) => {
       const { data } = await axios.get("/api/seller/is-auth");
       if (data.success) {
         setIsSeller(true);
+        setIsAdmin(data.user?.role === "admin");
+        setSellerProfile(data.sellerProfile ?? null);
       } else {
         setIsSeller(false);
+        setIsAdmin(false);
+        setSellerProfile(null);
+        setSellerProducts([]);
       }
     } catch (error) {
       setIsSeller(false);
+      setIsAdmin(false);
+      setSellerProfile(null);
+      setSellerProducts([]);
     }
   };
 
@@ -39,9 +50,16 @@ export const AppContextProvider = ({ children }) => {
       if (data.success) {
         setUser(data.user);
         setCartItems(data.user.cartItems);
+        const role = data.user?.role;
+        setIsSeller(role === "seller" || role === "admin");
+        setIsAdmin(role === "admin");
       }
     } catch (error) {
       setUser(null);
+      setIsSeller(false);
+      setIsAdmin(false);
+      setSellerProfile(null);
+      setSellerProducts([]);
     }
   };
 
@@ -58,6 +76,21 @@ export const AppContextProvider = ({ children }) => {
     } catch (error) {
       toast.error(error.message);
       setProducts(dummyProducts);
+    }
+  };
+
+  const fetchSellerProducts = async () => {
+    try {
+      const { data } = await axios.get("/api/product/mine");
+      if (data.success) {
+        setSellerProducts(data.products ?? []);
+      } else {
+        toast.error(data.message);
+        setSellerProducts([]);
+      }
+    } catch (error) {
+      toast.error(error.message);
+      setSellerProducts([]);
     }
   };
 
@@ -141,9 +174,15 @@ export const AppContextProvider = ({ children }) => {
     setUser,
     setIsSeller,
     isSeller,
+    isAdmin,
+    setIsAdmin,
+    sellerProfile,
+    setSellerProfile,
     showUserLogin,
     setShowUserLogin,
     products,
+    sellerProducts,
+    setSellerProducts,
     currency,
     addToCart,
     updateCartItem,
@@ -155,6 +194,7 @@ export const AppContextProvider = ({ children }) => {
     getCartCount,
     axios,
     fetchProducts,
+    fetchSellerProducts,
     setCartItems,
   };
 

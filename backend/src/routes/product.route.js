@@ -5,6 +5,8 @@ import {
   productByIdtHandler,
   productListHandler,
   updateProductHandler,
+  deleteProductHandler,
+  productListForSellerHandler,
 } from "../controllers/product.controller.js";
 import { authSeller } from "../middlewares/authSeller.js";
 
@@ -14,9 +16,11 @@ const router = express.Router();
 
 router
   .route("/add")
-  .post(upload.array(["images"]), authSeller, addProductHandler);
+  .post(authSeller, upload.array("images", 6), addProductHandler);
 router.route("/list").get(productListHandler);
-router.route("id").get(productByIdtHandler);
+router.route("/mine").get(authSeller, productListForSellerHandler);
+router.route("/:id").get(productByIdtHandler);
 router.route("/stock").post(authSeller, updateProductHandler);
+router.route("/:id").delete(authSeller, deleteProductHandler);
 
 export default router;

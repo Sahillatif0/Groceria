@@ -1,7 +1,7 @@
 import { v2 as cloudinary } from "cloudinary";
 import { getDb } from "../db/client.js";
 import { products as productsTable } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { isValidUuid } from "../utils/validators.js";
 
 const db = () => getDb();
@@ -26,16 +26,37 @@ export const addProductHandler = async (req, res) => {
       })
     );
 
+    const sellerId =
+      req.userRole === "admin"
+        ? productData?.sellerId ?? null
+        : req.user;
+
+    const normalizedDescription = Array.isArray(productData.description)
+      ? productData.description
+      : typeof productData.description === "string"
+      ? productData.description.split("\n").map((item) => item.trim()).filter(Boolean)
+      : [];
+
+    const priceValue = Number(productData.price);
+    const offerValue = Number(productData.offerPrice);
+
+    if (Number.isNaN(priceValue) || Number.isNaN(offerValue)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid price values" });
+    }
+
     const [createdProduct] = await db()
       .insert(productsTable)
       .values({
         name: productData.name,
-        description: productData.description,
-        price: productData.price,
-        offerPrice: productData.offerPrice,
+        description: normalizedDescription,
+        price: priceValue,
+        offerPrice: offerValue,
         image: imagesUrl,
         category: productData.category,
         inStock: productData?.inStock ?? true,
+        sellerId,
       })
       .returning();
 
@@ -57,7 +78,10 @@ export const addProductHandler = async (req, res) => {
 };
 export const productListHandler = async (req, res) => {
   try {
-    const products = await db().select().from(productsTable);
+    const products = await db()
+      .select()
+      .from(productsTable)
+      .where(eq(productsTable.isArchived, false));
     res.status(200).json({
       success: true,
       products: products.map(formatProduct),
@@ -70,7 +94,7 @@ export const productListHandler = async (req, res) => {
 
 export const productByIdtHandler = async (req, res) => {
   try {
-    const { id } = req.body;
+    const { id } = req.params;
 
     if (!isValidUuid(id)) {
       return res
@@ -81,8 +105,13 @@ export const productByIdtHandler = async (req, res) => {
     const [product] = await db()
       .select()
       .from(productsTable)
-      .where(eq(productsTable.id, id))
+      .where(and(eq(productsTable.id, id), eq(productsTable.isArchived, false)))
       .limit(1);
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
     res.status(200).json({ success: true, product: formatProduct(product) });
   } catch (error) {
     console.log(error.message);
@@ -91,7 +120,7 @@ export const productByIdtHandler = async (req, res) => {
 };
 export const updateProductHandler = async (req, res) => {
   try {
-    const { id, inStock } = req.body;
+    const { id, ...updates } = req.body;
 
     if (!isValidUuid(id)) {
       return res
@@ -99,11 +128,171 @@ export const updateProductHandler = async (req, res) => {
         .json({ success: false, message: "Invalid product id" });
     }
 
+    const [productRecord] = await db()
+      .select()
+      .from(productsTable)
+      .where(eq(productsTable.id, id))
+      .limit(1);
+
+    if (!productRecord) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
+
+    if (productRecord.isArchived) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product is archived" });
+    }
+
+    if (
+      req.userRole === "seller" &&
+      productRecord.sellerId &&
+      productRecord.sellerId !== req.user
+    ) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to modify product" });
+    }
+
+    const payload = { updatedAt: new Date() };
+
+    if (updates.name !== undefined) {
+      payload.name = updates.name;
+    }
+
+    if (updates.description !== undefined) {
+      payload.description = Array.isArray(updates.description)
+        ? updates.description
+        : typeof updates.description === "string"
+        ? updates.description
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+        : productRecord.description;
+    }
+
+    if (updates.price !== undefined) {
+      const numericPrice = Number(updates.price);
+      if (Number.isNaN(numericPrice)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid price value" });
+      }
+      payload.price = numericPrice;
+    }
+
+    if (updates.offerPrice !== undefined) {
+      const numericOffer = Number(updates.offerPrice);
+      if (Number.isNaN(numericOffer)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid offer price" });
+      }
+      payload.offerPrice = numericOffer;
+    }
+
+    if (updates.category !== undefined) {
+      payload.category = updates.category;
+    }
+
+    if (updates.inStock !== undefined) {
+      if (typeof updates.inStock === "boolean") {
+        payload.inStock = updates.inStock;
+      } else if (typeof updates.inStock === "string") {
+        payload.inStock = updates.inStock.toLowerCase() === "true";
+      }
+    }
+
+    if (req.userRole === "admin" && updates.sellerId !== undefined) {
+      payload.sellerId = updates.sellerId;
+    }
+
     await db()
       .update(productsTable)
-      .set({ inStock, updatedAt: new Date() })
+      .set(payload)
       .where(eq(productsTable.id, id));
-    res.status(200).json({ success: true, message: "Stock updated" });
+    res.status(200).json({ success: true, message: "Product updated" });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteProductHandler = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidUuid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+
+    const [productRecord] = await db()
+      .select()
+      .from(productsTable)
+      .where(eq(productsTable.id, id))
+      .limit(1);
+
+    if (!productRecord) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
+
+    if (productRecord.isArchived) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product already archived" });
+    }
+
+    if (
+      req.userRole === "seller" &&
+      productRecord.sellerId &&
+      productRecord.sellerId !== req.user
+    ) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to delete product" });
+    }
+
+    if (productRecord.isArchived) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product already archived" });
+    }
+
+    await db()
+      .update(productsTable)
+      .set({ isArchived: true, updatedAt: new Date() })
+      .where(eq(productsTable.id, id));
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Product deleted successfully" });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const productListForSellerHandler = async (req, res) => {
+  try {
+    const sellerId = req.user;
+
+    const products = await db()
+      .select()
+      .from(productsTable)
+      .where(
+        and(eq(productsTable.isArchived, false), eq(productsTable.sellerId, sellerId))
+      );
+
+    res.status(200).json({
+      success: true,
+      products: products.map(formatProduct),
+    });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });

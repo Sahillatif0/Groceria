@@ -2,33 +2,106 @@ import React from "react";
 import { UseAppContext } from "../context/AppContext";
 import toast from "react-hot-toast";
 
+const MODES = [
+  { key: "user", label: "Customer" },
+  { key: "seller", label: "Seller" },
+  { key: "admin", label: "Admin" },
+];
+
 const Login = () => {
-  const { setShowUserLogin, setUser, axios, navigate } = UseAppContext();
+  const {
+    setShowUserLogin,
+    setUser,
+    setIsSeller,
+    setIsAdmin,
+    setSellerProfile,
+    axios,
+    navigate,
+  } = UseAppContext();
   const [state, setState] = React.useState("login");
+  const [loginMode, setLoginMode] = React.useState("user");
   const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
+  const [displayName, setDisplayName] = React.useState("");
 
   const onSubmitHandler = async (event) => {
     try {
       event.preventDefault();
+      if (loginMode === "seller") {
+        const endpoint = state === "register" ? "/api/seller/register" : "/api/seller/login";
+        const payload =
+          state === "register"
+            ? { name, email, password, displayName }
+            : { email, password };
+
+        const { data } = await axios.post(endpoint, payload);
+
+        if (!data.success) {
+          toast.error(data.message);
+          return;
+        }
+
+        toast.success(data.message);
+        setUser(data.user);
+        setSellerProfile(data.sellerProfile ?? null);
+        setIsSeller(
+          data.user?.role === "seller" || data.user?.role === "admin"
+        );
+        setIsAdmin(data.user?.role === "admin");
+        navigate("/seller");
+        setShowUserLogin(false);
+        return;
+      }
+
       const { data } = await axios.post(`/api/user/${state}`, {
         name,
         email,
         password,
       });
-      if (data.success) {
-        toast.success(data.message);
-        navigate("/");
-        setUser(data.user);
-        setShowUserLogin(false);
-      } else {
+
+      if (!data.success) {
         toast.error(data.message);
+        return;
       }
+
+      if (loginMode === "admin" && data.user?.role !== "admin") {
+        toast.error("Admin account required");
+        return;
+      }
+
+      toast.success(data.message);
+      setUser(data.user);
+      setIsSeller(
+        data.user?.role === "seller" || data.user?.role === "admin"
+      );
+      setIsAdmin(data.user?.role === "admin");
+      setSellerProfile(null);
+      navigate(loginMode === "admin" ? "/admin" : "/");
+      setShowUserLogin(false);
     } catch (error) {
-      toast.error(error.message);
+      toast.error(error?.response?.data?.message || error.message);
     }
   };
+
+  const handleModeChange = (mode) => {
+    setLoginMode(mode);
+    setState("login");
+    setName("");
+    setEmail("");
+    setPassword("");
+    setDisplayName("");
+  };
+
+  const canRegister = loginMode !== "admin";
+  const isRegistering = canRegister && state === "register";
+
+  const headingLabel =
+    loginMode === "user"
+      ? "User"
+      : loginMode === "seller"
+      ? "Seller"
+      : "Admin";
 
   return (
     <div
@@ -40,11 +113,27 @@ const Login = () => {
         onClick={(e) => e.stopPropagation()}
         className="flex flex-col gap-4 m-auto items-start p-8 py-12 w-80 sm:w-[352px] rounded-lg shadow-xl border border-gray-200 bg-white"
       >
+        <div className="flex w-full gap-2">
+          {MODES.map((mode) => (
+            <button
+              type="button"
+              key={mode.key}
+              onClick={() => handleModeChange(mode.key)}
+              className={`w-full rounded-md border px-3 py-2 text-sm transition ${
+                loginMode === mode.key
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-gray-200 hover:border-primary/60"
+              }`}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
         <p className="text-2xl font-medium m-auto">
-          <span className="text-primary">User</span>{" "}
-          {state === "login" ? "Login" : "Sign Up"}
+          <span className="text-primary">{headingLabel}</span>{" "}
+          {isRegistering ? "Sign Up" : "Login"}
         </p>
-        {state === "register" && (
+        {isRegistering && (
           <div className="w-full">
             <p>Name</p>
             <input
@@ -54,6 +143,18 @@ const Login = () => {
               className="border border-gray-200 rounded w-full p-2 mt-1 outline-primary"
               type="text"
               required
+            />
+          </div>
+        )}
+        {isRegistering && loginMode === "seller" && (
+          <div className="w-full">
+            <p>Display Name</p>
+            <input
+              onChange={(event) => setDisplayName(event.target.value)}
+              value={displayName}
+              placeholder="store or brand name"
+              className="border border-gray-200 rounded w-full p-2 mt-1 outline-primary"
+              type="text"
             />
           </div>
         )}
@@ -79,29 +180,31 @@ const Login = () => {
             required
           />
         </div>
-        {state === "register" ? (
-          <p>
-            Already have account?{" "}
-            <span
-              onClick={() => setState("login")}
-              className="text-primary cursor-pointer"
-            >
-              click here
-            </span>
-          </p>
-        ) : (
-          <p>
-            Create an account?{" "}
-            <span
-              onClick={() => setState("register")}
-              className="text-primary cursor-pointer"
-            >
-              click here
-            </span>
-          </p>
+        {canRegister && (
+          isRegistering ? (
+            <p>
+              Already have account?{" "}
+              <span
+                onClick={() => setState("login")}
+                className="text-primary cursor-pointer"
+              >
+                click here
+              </span>
+            </p>
+          ) : (
+            <p>
+              Need an account?{" "}
+              <span
+                onClick={() => setState("register")}
+                className="text-primary cursor-pointer"
+              >
+                click here
+              </span>
+            </p>
+          )
         )}
         <button className="bg-primary hover:bg-secondary-dull transition-all text-white w-full py-2 rounded-md cursor-pointer">
-          {state === "register" ? "Create Account" : "Login"}
+          {isRegistering ? "Create Account" : "Login"}
         </button>
 
         {/* ye jo he wo bich wali line he */}

@@ -1,10 +1,23 @@
+import { useEffect } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { assets } from "../../assets/assets";
 import { UseAppContext } from "../../context/AppContext";
 import toast from "react-hot-toast";
 
 const SellerLayout = () => {
-  const { axios, navigate } = UseAppContext();
+  const {
+    axios,
+    navigate,
+    sellerProfile,
+    user,
+    isAdmin,
+    fetchSellerProducts,
+    setIsSeller,
+    setIsAdmin,
+    setUser,
+    setSellerProfile,
+    setSellerProducts,
+  } = UseAppContext();
 
   const sidebarLinks = [
     { name: "Add Product", path: "/seller", icon: assets.add_icon },
@@ -16,12 +29,21 @@ const SellerLayout = () => {
     { name: "Orders", path: "/seller/orders", icon: assets.order_icon },
   ];
 
+  useEffect(() => {
+    fetchSellerProducts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const logout = async () => {
-    // setIsSeller(false);
     try {
       const { data } = await axios.get("/api/seller/logout");
       if (data.success) {
         toast.success(data.message);
+        setIsSeller(false);
+        setIsAdmin(false);
+        setUser(null);
+        setSellerProfile(null);
+        setSellerProducts([]);
         navigate("/");
       } else {
         toast.error(data.message);
@@ -42,7 +64,10 @@ const SellerLayout = () => {
           />
         </Link>
         <div className="flex items-center gap-5 text-gray-500">
-          <p>Hi! Admin</p>
+            <p>
+              Hi! {sellerProfile?.displayName || user?.name}
+              {isAdmin ? " (Admin)" : ""}
+            </p>
           <button
             onClick={logout}
             className="border rounded-full text-sm px-4 py-1"

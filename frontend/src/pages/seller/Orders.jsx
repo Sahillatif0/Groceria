@@ -22,11 +22,15 @@ const Orders = () => {
 
   useEffect(() => {
     fetchOrders();
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div className="no-scrollbar flex-1 h-[95vh] overflow-y-scroll">
       <div className="md:p-10 p-4 space-y-4">
         <h2 className="text-lg font-medium">Orders List</h2>
+        {orders.length === 0 && (
+          <p className="text-sm text-gray-500">No orders yet.</p>
+        )}
         {orders.map((order, index) => (
           <div
             key={index}
@@ -75,6 +79,7 @@ const Orders = () => {
               <p>Method: {order.paymentType}</p>
               <p>Date: {new Date(order.createdAt).toDateString()}</p>
               <p>Payment: {order.isPaid ? "Paid" : "Pending"}</p>
+              <p>Status: {order.status}</p>
             </div>
           </div>
         ))}

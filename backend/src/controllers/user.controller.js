@@ -46,9 +46,13 @@ export const registerHandler = async (req, res) => {
       .values({ name, email, password: hashedPassword })
       .returning();
 
-    const token = jwt.sign({ id: createdUser.id }, process.env.ACCESS_TOKEN_SECRET, {
+    const token = jwt.sign(
+      { id: createdUser.id, role: createdUser.role },
+      process.env.ACCESS_TOKEN_SECRET,
+      {
       expiresIn: "7d",
-    });
+      }
+    );
 
     res.cookie("token", token, {
       httpOnly: true,
@@ -64,6 +68,7 @@ export const registerHandler = async (req, res) => {
         email: createdUser.email,
         _id: createdUser.id,
         id: createdUser.id,
+        role: createdUser.role,
       },
       message: "User registered successfully",
     });
@@ -94,6 +99,12 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Invalid email or password" });
     }
 
+    if (!user.isActive) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Account is inactive" });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res
@@ -101,7 +112,7 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Password does not matched" });
     }
 
-    const token = jwt.sign({ id: user.id }, process.env.ACCESS_TOKEN_SECRET, {
+    const token = jwt.sign({ id: user.id, role: user.role }, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "7d",
     });
 
@@ -119,6 +130,7 @@ export const loginHandler = async (req, res) => {
         email: user.email,
         _id: user.id,
         id: user.id,
+        role: user.role,
       },
       message: "User LoggedIn successfully",
     });

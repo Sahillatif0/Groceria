@@ -8,6 +8,7 @@ import {
   users,
 } from "../db/schema.js";
 import { eq, inArray, and, or, desc } from "drizzle-orm";
+import { isValidUuid } from "../utils/validators.js";
 
 const db = () => getDb();
 
@@ -19,7 +20,7 @@ const buildProductsMap = async (productIds) => {
   const rows = await db()
     .select()
     .from(products)
-    .where(inArray(products.id, productIds));
+    .where(and(inArray(products.id, productIds), eq(products.isArchived, false)));
 
   return new Map(
     rows.map((item) => [item.id, { ...item, _id: item.id }])
@@ -328,18 +329,109 @@ export const getUserOrdersHandler = async (req, res) => {
 
 // get all orders for seller : api/order/seller
 
-export const getAllOrdersHandler = async (req, res) => {
+export const getSellerOrdersHandler = async (req, res) => {
   try {
+    const sellerId = req.user;
+
+    const itemRows = await db()
+      .select({
+        orderId: orderItems.orderId,
+        productSellerId: products.sellerId,
+      })
+      .from(orderItems)
+      .innerJoin(products, eq(orderItems.productId, products.id))
+      .where(eq(products.sellerId, sellerId));
+
+    const orderIds = Array.from(new Set(itemRows.map((row) => row.orderId)));
+
+    if (!orderIds.length) {
+      return res.status(200).json({ success: true, orders: [] });
+    }
+
     const orderList = await db()
       .select()
       .from(orders)
-      .where(or(eq(orders.paymentType, "COD"), eq(orders.isPaid, true)))
+      .where(inArray(orders.id, orderIds))
       .orderBy(desc(orders.createdAt));
 
     const hydratedOrders = await attachOrderRelations(orderList);
 
-    return res.status(200).json({ success: true, orders: hydratedOrders });
+    const filteredOrders = hydratedOrders.map((order) => ({
+      ...order,
+      items: order.items.filter(
+        (item) => item.product?.sellerId === sellerId
+      ),
+    }));
+
+    return res.status(200).json({ success: true, orders: filteredOrders });
   } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const cancelUserOrderHandler = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = req.user;
+
+    if (!isValidUuid(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+
+    const [orderRecord] = await db()
+      .select()
+      .from(orders)
+      .where(eq(orders.id, orderId))
+      .limit(1);
+
+    if (!orderRecord || orderRecord.userId !== userId) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    const statusValue = (orderRecord.status || "").toLowerCase();
+
+    if (statusValue === "cancelled") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Order already cancelled" });
+    }
+
+    const nonCancelableStatuses = [
+      "shipped",
+      "out for delivery",
+      "delivered",
+      "completed",
+    ];
+
+    if (nonCancelableStatuses.includes(statusValue)) {
+      return res.status(400).json({
+        success: false,
+        message: "Order is already in fulfilment and cannot be cancelled",
+      });
+    }
+
+    if (orderRecord.paymentType === "Online" && orderRecord.isPaid) {
+      return res.status(400).json({
+        success: false,
+        message: "Paid online orders require manual support for cancellation",
+      });
+    }
+
+    await db()
+      .update(orders)
+      .set({ status: "Cancelled", cancelledAt: new Date(), updatedAt: new Date() })
+      .where(eq(orders.id, orderId));
+
+    return res.status(200).json({
+      success: true,
+      message: "Order cancelled successfully",
+    });
+  } catch (error) {
+    console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

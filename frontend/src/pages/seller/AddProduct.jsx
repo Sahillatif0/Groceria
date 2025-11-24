@@ -10,18 +10,16 @@ const AddProduct = () => {
   const [category, setCategory] = useState("");
   const [price, setPrice] = useState("");
   const [offerPrice, setOfferPrice] = useState("");
-
-  const { axios } = UseAppContext();
+  const { axios, fetchSellerProducts } = UseAppContext();
   const onSubmitHandler = async (event) => {
     event.preventDefault();
     try {
-      event.preventDefault();
       const productData = {
         name,
         description: description.split("\n"),
         category,
-        price,
-        offerPrice,
+        price: Number(price),
+        offerPrice: Number(offerPrice),
       };
 
       const formData = new FormData();
@@ -38,8 +36,9 @@ const AddProduct = () => {
         setDescription("");
         setCategory("");
         setPrice("");
-        setOfferPrice;
+        setOfferPrice("");
         setFiles([]);
+        fetchSellerProducts();
       } else {
         toast.error(data.message);
       }

@@ -1,5 +1,26 @@
-import { pgTable, uuid, text, boolean, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  uuid,
+  text,
+  boolean,
+  integer,
+  timestamp,
+  jsonb,
+  pgEnum,
+} from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
+
+export const userRoleEnum = pgEnum("user_role", [
+  "customer",
+  "seller",
+  "admin",
+]);
+
+export const sellerStatusEnum = pgEnum("seller_status", [
+  "pending",
+  "active",
+  "suspended",
+]);
 
 export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -7,6 +28,21 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   password: text("password").notNull(),
   cartItems: jsonb("cart_items").default(sql`'{}'::jsonb`).notNull(),
+  role: userRoleEnum("role").notNull().default("customer"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const sellers = pgTable("sellers", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" })
+    .unique(),
+  displayName: text("display_name").notNull(),
+  status: sellerStatusEnum("status").notNull().default("pending"),
+  deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -20,6 +56,8 @@ export const products = pgTable("products", {
   image: jsonb("image").default(sql`'[]'::jsonb`).notNull(),
   category: text("category").notNull(),
   inStock: boolean("in_stock").default(true).notNull(),
+  isArchived: boolean("is_archived").default(false).notNull(),
+  sellerId: uuid("seller_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -48,6 +86,7 @@ export const orders = pgTable("orders", {
   status: text("status").default("Order Placed").notNull(),
   paymentType: text("payment_type").notNull(),
   isPaid: boolean("is_paid").default(false).notNull(),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -60,13 +99,33 @@ export const orderItems = pgTable("order_items", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const usersRelations = relations(users, ({ many }) => ({
+export const adminAuditLogs = pgTable("admin_audit_logs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  adminId: uuid("admin_id").references(() => users.id, { onDelete: "set null" }),
+  action: text("action").notNull(),
+  targetType: text("target_type").notNull(),
+  targetId: text("target_id"),
+  metadata: jsonb("metadata").default(sql`'{}'::jsonb`).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const usersRelations = relations(users, ({ one, many }) => ({
   addresses: many(addresses),
   orders: many(orders),
+  products: many(products),
+  sellerProfile: one(sellers, {
+    fields: [users.id],
+    references: [sellers.userId],
+  }),
+  adminLogs: many(adminAuditLogs),
 }));
 
-export const productsRelations = relations(products, ({ many }) => ({
+export const productsRelations = relations(products, ({ one, many }) => ({
   orderItems: many(orderItems),
+  seller: one(users, {
+    fields: [products.sellerId],
+    references: [users.id],
+  }),
 }));
 
 export const addressesRelations = relations(addresses, ({ one, many }) => ({
@@ -97,5 +156,19 @@ export const orderItemsRelations = relations(orderItems, ({ one }) => ({
   product: one(products, {
     fields: [orderItems.productId],
     references: [products.id],
+  }),
+}));
+
+export const sellersRelations = relations(sellers, ({ one }) => ({
+  user: one(users, {
+    fields: [sellers.userId],
+    references: [users.id],
+  }),
+}));
+
+export const adminAuditLogsRelations = relations(adminAuditLogs, ({ one }) => ({
+  admin: one(users, {
+    fields: [adminAuditLogs.adminId],
+    references: [users.id],
   }),
 }));
