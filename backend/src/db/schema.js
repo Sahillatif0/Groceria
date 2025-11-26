@@ -99,6 +99,42 @@ export const orderItems = pgTable("order_items", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+export const chatConversations = pgTable("chat_conversations", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  sellerId: uuid("seller_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  productId: uuid("product_id").references(() => products.id, {
+    onDelete: "set null",
+  }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+export const chatMessages = pgTable("chat_messages", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  conversationId: uuid("conversation_id")
+    .notNull()
+    .references(() => chatConversations.id, { onDelete: "cascade" }),
+  senderId: uuid("sender_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  senderRole: userRoleEnum("sender_role").notNull(),
+  body: text("body").notNull(),
+  readByUser: boolean("read_by_user").default(false).notNull(),
+  readBySeller: boolean("read_by_seller").default(false).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
 export const adminAuditLogs = pgTable("admin_audit_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
   adminId: uuid("admin_id").references(() => users.id, { onDelete: "set null" }),
@@ -169,6 +205,33 @@ export const sellersRelations = relations(sellers, ({ one }) => ({
 export const adminAuditLogsRelations = relations(adminAuditLogs, ({ one }) => ({
   admin: one(users, {
     fields: [adminAuditLogs.adminId],
+    references: [users.id],
+  }),
+}));
+
+export const chatConversationsRelations = relations(chatConversations, ({ one, many }) => ({
+  customer: one(users, {
+    fields: [chatConversations.userId],
+    references: [users.id],
+  }),
+  seller: one(users, {
+    fields: [chatConversations.sellerId],
+    references: [users.id],
+  }),
+  product: one(products, {
+    fields: [chatConversations.productId],
+    references: [products.id],
+  }),
+  messages: many(chatMessages),
+}));
+
+export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
+  conversation: one(chatConversations, {
+    fields: [chatMessages.conversationId],
+    references: [chatConversations.id],
+  }),
+  sender: one(users, {
+    fields: [chatMessages.senderId],
     references: [users.id],
   }),
 }));

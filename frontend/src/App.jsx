@@ -23,6 +23,7 @@ import AdminUsers from "./pages/admin/AdminUsers";
 import AdminSellers from "./pages/admin/AdminSellers";
 import AdminProducts from "./pages/admin/AdminProducts";
 import AdminOrders from "./pages/admin/AdminOrders";
+import Messages from "./pages/seller/Messages";
 
 const App = () => {
   const location = useLocation();
@@ -56,6 +57,7 @@ const App = () => {
             {/* <Route path="add-product" element={<AddProduct />} /> */}
             <Route path="product-list" element={<ProductList></ProductList>} />
             <Route path="orders" element={<Orders></Orders>} />
+            <Route path="messages" element={<Messages />} />
           </Route>
 
           <Route

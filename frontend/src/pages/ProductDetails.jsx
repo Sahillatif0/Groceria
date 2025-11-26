@@ -3,13 +3,23 @@ import { UseAppContext } from "../context/AppContext";
 import { Link, useParams } from "react-router-dom";
 import { assets } from "../assets/assets";
 import ProductCard from "../components/ProductCard";
+import toast from "react-hot-toast";
+import ChatModal from "../components/ChatModal";
 
 const ProductDetails = () => {
-  const { products, navigate, currency, addToCart } = UseAppContext();
+  const {
+    products,
+    navigate,
+    currency,
+    addToCart,
+    user,
+    setShowUserLogin,
+  } = UseAppContext();
   const { id } = useParams();
 
   const [relatedProducts, setRelatedProducts] = useState([]);
   const [thumbnail, setThumbnail] = useState(null);
+  const [showChat, setShowChat] = useState(false);
 
   const product = products.find((item) => item._id === id);
 
@@ -110,6 +120,25 @@ const ProductDetails = () => {
               >
                 Buy now
               </button>
+              <button
+                onClick={() => {
+                  if (!product?.sellerId) {
+                    toast.error("Seller is not available for this product");
+                    return;
+                  }
+
+                  if (!user) {
+                    toast.error("Please login to chat with the seller");
+                    setShowUserLogin(true);
+                    return;
+                  }
+
+                  setShowChat(true);
+                }}
+                className="w-full py-3.5 cursor-pointer font-medium border border-primary text-primary hover:bg-primary/10 transition"
+              >
+                Chat with seller
+              </button>
             </div>
           </div>
         </div>
@@ -139,6 +168,12 @@ const ProductDetails = () => {
             See more
           </button>
         </div>
+        {showChat && product ? (
+          <ChatModal
+            product={product}
+            onClose={() => setShowChat(false)}
+          />
+        ) : null}
       </div>
     )
   );

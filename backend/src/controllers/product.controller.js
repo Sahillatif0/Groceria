@@ -120,9 +120,10 @@ export const productByIdtHandler = async (req, res) => {
 };
 export const updateProductHandler = async (req, res) => {
   try {
-    const { id, ...updates } = req.body;
+    const productId = req.params?.id ?? req.body?.id;
+    const { id: _ignoredId, ...updates } = req.body ?? {};
 
-    if (!isValidUuid(id)) {
+    if (!isValidUuid(productId)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid product id" });
@@ -131,7 +132,7 @@ export const updateProductHandler = async (req, res) => {
     const [productRecord] = await db()
       .select()
       .from(productsTable)
-      .where(eq(productsTable.id, id))
+      .where(eq(productsTable.id, productId))
       .limit(1);
 
     if (!productRecord) {
@@ -212,7 +213,7 @@ export const updateProductHandler = async (req, res) => {
     await db()
       .update(productsTable)
       .set(payload)
-      .where(eq(productsTable.id, id));
+      .where(eq(productsTable.id, productId));
     res.status(200).json({ success: true, message: "Product updated" });
   } catch (error) {
     console.log(error.message);

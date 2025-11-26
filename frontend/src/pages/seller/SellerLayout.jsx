@@ -27,6 +27,11 @@ const SellerLayout = () => {
       icon: assets.product_list_icon,
     },
     { name: "Orders", path: "/seller/orders", icon: assets.order_icon },
+    {
+      name: "Messages",
+      path: "/seller/messages",
+      icon: assets.refresh_icon,
+    },
   ];
 
   useEffect(() => {

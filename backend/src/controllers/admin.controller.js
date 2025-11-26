@@ -550,7 +550,33 @@ export const deleteProductAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid product id" });
     }
 
+    const [productRecord] = await db()
+      .select()
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1);
+
+    if (!productRecord) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
+
     if (shouldHardDelete) {
+      const [linkedOrderItem] = await db()
+        .select()
+        .from(orderItems)
+        .where(eq(orderItems.productId, productId))
+        .limit(1);
+
+      if (linkedOrderItem) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Cannot permanently delete a product with existing order history. Archive instead or remove related orders first.",
+        });
+      }
+
       await db().delete(products).where(eq(products.id, productId));
     } else {
       await db()

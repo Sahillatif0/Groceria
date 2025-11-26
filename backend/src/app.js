@@ -25,6 +25,7 @@ import addressRouter from "./routes/address.route.js";
 import orderRouter from "./routes/order.route.js";
 import { stripeWebhook } from "./controllers/order.controller.js";
 import adminRouter from "./routes/admin.route.js";
+import chatRouter from "./routes/chat.route.js";
 
 // app.use("/", (req, res) => {
 //   res.send("fareed");
@@ -37,4 +38,5 @@ app.use("/api/cart", cartRouter);
 app.use("/api/address", addressRouter);
 app.use("/api/order", orderRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/chat", chatRouter);
 app.post("/stripe", express.raw({ type: "application/json" }), stripeWebhook);

@@ -19,8 +19,11 @@ router
   .post(authSeller, upload.array("images", 6), addProductHandler);
 router.route("/list").get(productListHandler);
 router.route("/mine").get(authSeller, productListForSellerHandler);
-router.route("/:id").get(productByIdtHandler);
 router.route("/stock").post(authSeller, updateProductHandler);
-router.route("/:id").delete(authSeller, deleteProductHandler);
+router
+  .route("/:id")
+  .get(productByIdtHandler)
+  .patch(authSeller, updateProductHandler)
+  .delete(authSeller, deleteProductHandler);
 
 export default router;
