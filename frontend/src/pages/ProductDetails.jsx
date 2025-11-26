@@ -13,6 +13,7 @@ const ProductDetails = () => {
     currency,
     addToCart,
     user,
+    sellerProfile,
     setShowUserLogin,
   } = UseAppContext();
   const { id } = useParams();
@@ -22,6 +23,13 @@ const ProductDetails = () => {
   const [showChat, setShowChat] = useState(false);
 
   const product = products.find((item) => item._id === id);
+
+  const currentUserId =
+    user?._id || user?.id || sellerProfile?.userId || null;
+  const ownsProduct = Boolean(
+    product?.sellerId && currentUserId && product.sellerId === currentUserId
+  );
+  const canShowChatButton = Boolean(product?.sellerId) && !ownsProduct;
 
   useEffect(() => {
     if (products.length > 0) {
@@ -120,25 +128,32 @@ const ProductDetails = () => {
               >
                 Buy now
               </button>
-              <button
-                onClick={() => {
-                  if (!product?.sellerId) {
-                    toast.error("Seller is not available for this product");
-                    return;
-                  }
+              {canShowChatButton ? (
+                <button
+                  onClick={() => {
+                    if (!product?.sellerId) {
+                      toast.error("Seller is not available for this product");
+                      return;
+                    }
 
-                  if (!user) {
-                    toast.error("Please login to chat with the seller");
-                    setShowUserLogin(true);
-                    return;
-                  }
+                    if (ownsProduct) {
+                      toast.error("You cannot chat with your own seller account");
+                      return;
+                    }
 
-                  setShowChat(true);
-                }}
-                className="w-full py-3.5 cursor-pointer font-medium border border-primary text-primary hover:bg-primary/10 transition"
-              >
-                Chat with seller
-              </button>
+                    if (!user) {
+                      toast.error("Please login to chat with the seller");
+                      setShowUserLogin(true);
+                      return;
+                    }
+
+                    setShowChat(true);
+                  }}
+                  className="w-full py-3.5 cursor-pointer font-medium border border-primary text-primary hover:bg-primary/10 transition"
+                >
+                  Chat with seller
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -168,7 +183,7 @@ const ProductDetails = () => {
             See more
           </button>
         </div>
-        {showChat && product ? (
+        {showChat && product && canShowChatButton ? (
           <ChatModal
             product={product}
             onClose={() => setShowChat(false)}

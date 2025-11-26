@@ -1,21 +1,29 @@
 import cors from "cors";
 
-export const configureCors = () => {
-  const baseOrigins = ["http://localhost:5173", process.env.FRONTEND_URL];
+const BASE_ORIGINS = ["http://localhost:5173", process.env.FRONTEND_URL];
 
+export const getAllowedOrigins = () => BASE_ORIGINS.filter(Boolean);
+
+export const isOriginAllowed = (origin) => {
+  if (!origin) {
+    return true;
+  }
+
+  const allowedOrigins = getAllowedOrigins();
+  const isGithubCodespace = origin.endsWith(".app.github.dev");
+  return allowedOrigins.includes(origin) || isGithubCodespace;
+};
+
+export const configureCors = () => {
   return cors({
     origin: (origin, callback) => {
-      const allowedOrigins = baseOrigins.filter(Boolean);
-      const isGithubCodespace =
-        origin && origin.endsWith(".app.github.dev");
-
-      if (!origin || allowedOrigins.includes(origin) || isGithubCodespace) {
+      if (isOriginAllowed(origin ?? "")) {
         callback(null, true);
       } else {
         callback(new Error("Not allowed by the cors"));
       }
     },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",

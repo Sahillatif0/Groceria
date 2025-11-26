@@ -121,7 +121,22 @@ export const productByIdtHandler = async (req, res) => {
 export const updateProductHandler = async (req, res) => {
   try {
     const productId = req.params?.id ?? req.body?.id;
-    const { id: _ignoredId, ...updates } = req.body ?? {};
+    const rawPayload =
+      typeof req.body?.productData === "string" ? req.body.productData : null;
+
+    let parsedUpdates = {};
+    if (rawPayload) {
+      try {
+        parsedUpdates = JSON.parse(rawPayload);
+      } catch (error) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid product payload" });
+      }
+    }
+
+    const incoming = rawPayload ? parsedUpdates : req.body ?? {};
+    const { id: _ignoredId, existingImages, ...updates } = incoming;
 
     if (!isValidUuid(productId)) {
       return res
@@ -158,6 +173,19 @@ export const updateProductHandler = async (req, res) => {
     }
 
     const payload = { updatedAt: new Date() };
+
+    let normalizedImages;
+    if (existingImages !== undefined) {
+      if (Array.isArray(existingImages)) {
+        normalizedImages = existingImages.filter(
+          (item) => typeof item === "string" && item.trim().length > 0
+        );
+      } else if (typeof existingImages === "string" && existingImages.trim().length > 0) {
+        normalizedImages = [existingImages.trim()];
+      } else {
+        normalizedImages = [];
+      }
+    }
 
     if (updates.name !== undefined) {
       payload.name = updates.name;
@@ -208,6 +236,23 @@ export const updateProductHandler = async (req, res) => {
 
     if (req.userRole === "admin" && updates.sellerId !== undefined) {
       payload.sellerId = updates.sellerId;
+    }
+
+    const uploadedImages = Array.isArray(req.files)
+      ? await Promise.all(
+          req.files.map(async (file) => {
+            const result = await cloudinary.uploader.upload(file.path, {
+              resource_type: "image",
+            });
+            return result.secure_url;
+          })
+        )
+      : [];
+
+    if (normalizedImages !== undefined || uploadedImages.length > 0) {
+      const currentImages = normalizedImages ?? productRecord.image ?? [];
+      const finalImages = [...currentImages, ...uploadedImages];
+      payload.image = finalImages;
     }
 
     await db()

@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { UseAppContext } from "../context/AppContext";
 
 const ChatModal = ({ product, onClose }) => {
-  const { axios, user } = UseAppContext();
+  const { axios, user, socket, connectSocket } = UseAppContext();
   const [conversation, setConversation] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [messageBody, setMessageBody] = useState("");
+  const messageListRef = useRef(null);
 
   const sellerId = product?.sellerId ?? null;
   const productId = product?._id ?? product?.id ?? null;
@@ -96,21 +97,105 @@ const ChatModal = ({ product, onClose }) => {
     }
   }, [axios, sellerId, productId, loadMessages]);
 
+  const currentUserId = useMemo(() => user?._id || user?.id || null, [user]);
+
+  const isOwnMessage = useCallback(
+    (message) => currentUserId && message.senderId === currentUserId,
+    [currentUserId]
+  );
+
   useEffect(() => {
     loadConversation();
   }, [loadConversation]);
 
   useEffect(() => {
-    if (!conversation?.id) {
-      return () => {};
+    connectSocket?.();
+  }, [connectSocket]);
+
+  const socketConnected = socket?.connected ?? false;
+
+  const scrollToBottom = useCallback(() => {
+    const container = messageListRef.current;
+    if (!container) {
+      return;
     }
 
-    const interval = setInterval(() => {
-      loadMessages(conversation.id, { silent: true });
-    }, 5000);
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, []);
 
-    return () => clearInterval(interval);
-  }, [conversation?.id, loadMessages]);
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!socketConnected || !conversation?.id) {
+      return;
+    }
+
+    socket.emit("chat:join", { conversationId: conversation.id });
+
+    return () => {
+      if (socket.connected) {
+        socket.emit("chat:leave", { conversationId: conversation.id });
+      }
+    };
+  }, [conversation?.id, socket, socketConnected]);
+
+  useEffect(() => {
+    if (!socket) {
+      return;
+    }
+
+    const handleConversationUpdate = (incomingConversation) => {
+      if (!incomingConversation) {
+        return;
+      }
+
+      if (conversation?.id === incomingConversation.id) {
+        setConversation(incomingConversation);
+      } else if (!conversation) {
+        const matchesSeller =
+          incomingConversation.sellerId === sellerId;
+        const matchesProduct =
+          !productId || incomingConversation.productId === productId;
+
+        if (matchesSeller && matchesProduct) {
+          setConversation(incomingConversation);
+          loadMessages(incomingConversation.id, { silent: true });
+        }
+      }
+    };
+
+    const handleMessage = ({ conversationId, message }) => {
+      if (!conversationId || !message) {
+        return;
+      }
+
+      if (!conversation || conversation.id !== conversationId) {
+        loadConversation();
+        return;
+      }
+
+      setMessages((previous) => {
+        if (previous.some((existing) => existing.id === message.id)) {
+          return previous;
+        }
+        return [...previous, message];
+      });
+
+      if (!isOwnMessage(message)) {
+        loadMessages(conversationId, { silent: true });
+      }
+    };
+
+    socket.on("chat:conversation", handleConversationUpdate);
+    socket.on("chat:message", handleMessage);
+
+    return () => {
+      socket.off("chat:conversation", handleConversationUpdate);
+      socket.off("chat:message", handleMessage);
+    };
+  }, [conversation, isOwnMessage, loadConversation, loadMessages, productId, sellerId, socket]);
 
   const handleSend = useCallback(
     async (event) => {
@@ -140,29 +225,29 @@ const ChatModal = ({ product, onClose }) => {
           return;
         }
 
-        setConversation(data.conversation ?? null);
-        setMessages((prev) => [...prev, data.message]);
+        const updatedConversation = data.conversation ?? null;
+        const nextConversationId =
+          updatedConversation?.id ?? conversation?.id ?? null;
+
+        setConversation(updatedConversation);
         setMessageBody("");
+
+        if (nextConversationId) {
+          loadMessages(nextConversationId, { silent: true });
+        }
       } catch (error) {
         toast.error(error?.response?.data?.message || error.message);
       } finally {
         setSending(false);
       }
     },
-    [axios, conversation?.id, messageBody, productId, sellerId]
+    [axios, conversation?.id, loadMessages, messageBody, productId, sellerId]
   );
 
   const closeModal = (event) => {
     event?.stopPropagation?.();
     onClose?.();
   };
-
-  const currentUserId = useMemo(() => user?._id || user?.id || null, [user]);
-
-  const isOwnMessage = useCallback(
-    (message) => currentUserId && message.senderId === currentUserId,
-    [currentUserId]
-  );
 
   return (
     <div
@@ -189,7 +274,10 @@ const ChatModal = ({ product, onClose }) => {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-3">
+        <div
+          ref={messageListRef}
+          className="flex-1 overflow-y-auto px-4 py-3"
+        >
           {loading && !messages.length ? (
             <p className="text-sm text-gray-500">Loading conversation…</p>
           ) : null}

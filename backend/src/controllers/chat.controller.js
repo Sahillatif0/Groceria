@@ -7,6 +7,7 @@ import {
   users,
 } from "../db/schema.js";
 import { isValidUuid } from "../utils/validators.js";
+import { emitChatMessage } from "../socket/chat.events.js";
 
 const db = () => getDb();
 
@@ -204,6 +205,10 @@ const resolveSellerAndProduct = async ({ sellerId, productId }) => {
 };
 
 const ensureConversation = async ({ userId, sellerId, productId }) => {
+  if (userId === sellerId) {
+    throw new Error("Cannot create a conversation with yourself");
+  }
+
   let conversation = await findExistingConversation({
     userId,
     sellerId,
@@ -394,11 +399,15 @@ export const sendUserMessage = async (req, res) => {
         });
       }
 
-      conversation = await ensureConversation({
-        userId: req.user,
-        sellerId: resolvedSellerId,
-        productId: resolvedProductId,
-      });
+      try {
+        conversation = await ensureConversation({
+          userId: req.user,
+          sellerId: resolvedSellerId,
+          productId: resolvedProductId,
+        });
+      } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
     }
 
     if (conversation.userId === conversation.sellerId) {
@@ -419,14 +428,21 @@ export const sendUserMessage = async (req, res) => {
       })
       .returning();
 
+    const formattedMessage = formatMessage(newMessage);
+
     await updateConversationTimestamp(conversation.id);
 
     const conversationMeta = await loadConversationWithMeta(conversation.id);
 
+    emitChatMessage({
+      conversation: conversationMeta,
+      message: formattedMessage,
+    });
+
     return res.status(201).json({
       success: true,
       conversation: conversationMeta,
-      message: formatMessage(newMessage),
+      message: formattedMessage,
     });
   } catch (error) {
     console.log(error.message);
@@ -442,12 +458,16 @@ export const listSellerConversations = async (req, res) => {
       .where(eq(chatConversations.sellerId, req.user))
       .orderBy(desc(chatConversations.updatedAt));
 
-    if (!conversations.length) {
+    const validConversations = conversations.filter(
+      (conversation) => conversation.userId !== conversation.sellerId
+    );
+
+    if (!validConversations.length) {
       return res.json({ success: true, conversations: [] });
     }
 
-    const userIds = [...new Set(conversations.map((item) => item.userId))];
-    const productIds = [...new Set(conversations.map((item) => item.productId).filter(Boolean))];
+    const userIds = [...new Set(validConversations.map((item) => item.userId))];
+    const productIds = [...new Set(validConversations.map((item) => item.productId).filter(Boolean))];
 
     const [sellerRecord, customerRecords, productRecords, lastMessageEntries] = await Promise.all([
       db()
@@ -463,7 +483,7 @@ export const listSellerConversations = async (req, res) => {
         ? db().select().from(products).where(inArray(products.id, productIds))
         : Promise.resolve([]),
       Promise.all(
-        conversations.map(async (conversation) => ({
+        validConversations.map(async (conversation) => ({
           conversationId: conversation.id,
           lastMessage: await getLastMessage(conversation.id),
         }))
@@ -476,7 +496,7 @@ export const listSellerConversations = async (req, res) => {
       lastMessageEntries.map(({ conversationId, lastMessage }) => [conversationId, lastMessage])
     );
 
-    const formatted = conversations.map((conversation) =>
+    const formatted = validConversations.map((conversation) =>
       formatConversation(conversation, {
         customer: customerMap.get(conversation.userId) ?? null,
         seller: sellerRecord,
@@ -512,6 +532,13 @@ export const getSellerConversationMessages = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Conversation not found" });
+    }
+
+    if (conversation.userId === conversation.sellerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot load messages for your own seller account",
+      });
     }
 
     const messages = await db()
@@ -566,6 +593,13 @@ export const sendSellerMessage = async (req, res) => {
         .json({ success: false, message: "Conversation not found" });
     }
 
+    if (conversation.userId === conversation.sellerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot send messages to your own seller account",
+      });
+    }
+
     const [newMessage] = await db()
       .insert(chatMessages)
       .values({
@@ -578,14 +612,21 @@ export const sendSellerMessage = async (req, res) => {
       })
       .returning();
 
+    const formattedMessage = formatMessage(newMessage);
+
     await updateConversationTimestamp(conversationId);
 
     const conversationMeta = await loadConversationWithMeta(conversationId);
 
+    emitChatMessage({
+      conversation: conversationMeta,
+      message: formattedMessage,
+    });
+
     return res.status(201).json({
       success: true,
       conversation: conversationMeta,
-      message: formatMessage(newMessage),
+      message: formattedMessage,
     });
   } catch (error) {
     console.log(error.message);

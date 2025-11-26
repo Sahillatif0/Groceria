@@ -1,8 +1,16 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { dummyProducts } from "../assets/assets";
 import axios from "axios";
+import { io } from "socket.io-client";
 
 axios.defaults.withCredentials = true;
 axios.defaults.baseURL = import.meta.env.VITE_BACKEND_URL;
@@ -20,6 +28,57 @@ export const AppContextProvider = ({ children }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [sellerProfile, setSellerProfile] = useState(null);
   const [sellerProducts, setSellerProducts] = useState([]);
+  const socketRef = useRef(null);
+  const [socket, setSocket] = useState(null);
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+
+  const connectSocket = useCallback(() => {
+    if (!backendUrl) {
+      return null;
+    }
+
+    if (socketRef.current) {
+      return socketRef.current;
+    }
+
+    const instance = io(backendUrl, {
+      withCredentials: true,
+      transports: ["websocket", "polling"],
+    });
+
+    const handleConnect = () => {
+      setSocket(instance);
+    };
+
+    const handleDisconnect = () => {
+      setSocket(null);
+      if (socketRef.current === instance) {
+        socketRef.current = null;
+      }
+    };
+
+    instance.on("connect", handleConnect);
+    instance.on("disconnect", handleDisconnect);
+    instance.on("connect_error", (error) => {
+      console.warn("Socket connection error", error?.message ?? error);
+    });
+
+    socketRef.current = instance;
+
+    return instance;
+  }, [backendUrl]);
+
+  const disconnectSocket = useCallback(() => {
+    const instance = socketRef.current;
+    if (!instance) {
+      return;
+    }
+
+    instance.removeAllListeners();
+    instance.disconnect();
+    socketRef.current = null;
+    setSocket(null);
+  }, []);
 
   // fetching seller status
   const fetchSeller = async () => {
@@ -152,6 +211,28 @@ export const AppContextProvider = ({ children }) => {
   }, []);
 
   useEffect(() => {
+    if (!backendUrl) {
+      return;
+    }
+
+    if (user || sellerProfile) {
+      connectSocket();
+    }
+  }, [backendUrl, connectSocket, user, sellerProfile]);
+
+  useEffect(() => {
+    if (!user && !sellerProfile) {
+      disconnectSocket();
+    }
+  }, [disconnectSocket, user, sellerProfile]);
+
+  useEffect(() => {
+    return () => {
+      disconnectSocket();
+    };
+  }, [disconnectSocket]);
+
+  useEffect(() => {
     const updateCart = async () => {
       try {
         const { data } = await axios.post("/api/cart/update", { cartItems });
@@ -196,6 +277,9 @@ export const AppContextProvider = ({ children }) => {
     fetchProducts,
     fetchSellerProducts,
     setCartItems,
+    socket,
+    connectSocket,
+    disconnectSocket,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

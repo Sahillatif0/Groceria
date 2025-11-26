@@ -69,6 +69,7 @@ import vanilla_muffins_image from "./vanilla_muffins_image.png";
 import quinoa_image from "./quinoa_image.png";
 import brown_rice_image from "./brown_rice_image.png";
 import barley_image from "./barley_image.png";
+import fashion_image from "./fashion.png"
 
 export const assets = {
   logo,
@@ -142,6 +143,18 @@ export const categories = [
     path: "Grains",
     image: grain_image,
     bgColor: "#F1E3F9",
+  },
+  {
+    text: "Fashion & Design",
+    path: "FashionDesign",
+    image: fashion_image,
+    bgColor: "#F3E8FF",
+  },
+  {
+    text: "Others",
+    path: "Others",
+    image: box_icon,
+    bgColor: "#E9EEF5",
   },
 ];
 

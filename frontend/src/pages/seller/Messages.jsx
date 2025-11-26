@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { UseAppContext } from "../../context/AppContext";
 
 const Messages = () => {
-  const { axios } = UseAppContext();
+  const { axios, socket, connectSocket } = UseAppContext();
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -11,6 +11,7 @@ const Messages = () => {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messageBody, setMessageBody] = useState("");
   const [sending, setSending] = useState(false);
+  const messageListRef = useRef(null);
 
   const activeConversation = useMemo(
     () => conversations.find((item) => item.id === activeConversationId) || null,
@@ -22,6 +23,22 @@ const Messages = () => {
       (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
     );
   }, []);
+
+  const upsertConversation = useCallback(
+    (incomingConversation) => {
+      if (!incomingConversation?.id) {
+        return;
+      }
+
+      setConversations((previous) => {
+        const others = previous.filter(
+          (conversation) => conversation.id !== incomingConversation.id
+        );
+        return sortByUpdatedAt([...others, incomingConversation]);
+      });
+    },
+    [sortByUpdatedAt]
+  );
 
   const fetchConversations = useCallback(async () => {
     setLoadingConversations(true);
@@ -75,12 +92,7 @@ const Messages = () => {
 
         setMessages(data.messages ?? []);
         if (data.conversation) {
-          setConversations((prev) => {
-            const others = prev.filter(
-              (conversation) => conversation.id !== data.conversation.id
-            );
-            return sortByUpdatedAt([...others, data.conversation]);
-          });
+          upsertConversation(data.conversation);
         }
       } catch (error) {
         toast.error(error?.response?.data?.message || error.message);
@@ -90,7 +102,7 @@ const Messages = () => {
         }
       }
     },
-    [axios]
+    [axios, upsertConversation]
   );
 
   useEffect(() => {
@@ -107,16 +119,79 @@ const Messages = () => {
   }, [activeConversationId, loadMessages]);
 
   useEffect(() => {
-    if (!activeConversationId) {
-      return () => {};
+    connectSocket?.();
+  }, [connectSocket]);
+
+  const socketConnected = socket?.connected ?? false;
+
+  const scrollToBottom = useCallback(() => {
+    const container = messageListRef.current;
+    if (!container) {
+      return;
     }
 
-    const interval = setInterval(() => {
-      loadMessages(activeConversationId, { silent: true });
-    }, 5000);
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, []);
 
-    return () => clearInterval(interval);
-  }, [activeConversationId, loadMessages]);
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!socketConnected || !activeConversationId) {
+      return;
+    }
+
+    socket.emit("chat:join", { conversationId: activeConversationId });
+
+    return () => {
+      if (socket.connected) {
+        socket.emit("chat:leave", { conversationId: activeConversationId });
+      }
+    };
+  }, [activeConversationId, socket, socketConnected]);
+
+  useEffect(() => {
+    if (!socket) {
+      return;
+    }
+
+    const handleConversationUpdate = (incomingConversation) => {
+      upsertConversation(incomingConversation);
+      if (!activeConversationId && incomingConversation?.id) {
+        setActiveConversationId(incomingConversation.id);
+      }
+    };
+
+    const handleMessage = ({ conversationId, message }) => {
+      if (!conversationId || !message) {
+        return;
+      }
+
+      if (conversationId !== activeConversationId) {
+        return;
+      }
+
+      setMessages((previous) => {
+        if (previous.some((item) => item.id === message.id)) {
+          return previous;
+        }
+        return [...previous, message];
+      });
+
+      if (message.senderId !== activeConversation?.sellerId) {
+        loadMessages(conversationId, { silent: true });
+      }
+    };
+
+    socket.on("chat:conversation", handleConversationUpdate);
+    socket.on("chat:message", handleMessage);
+
+    return () => {
+      socket.off("chat:conversation", handleConversationUpdate);
+      socket.off("chat:message", handleMessage);
+    };
+  }, [activeConversation, activeConversationId, loadMessages, socket, upsertConversation]);
 
   const handleSend = useCallback(
     async (event) => {
@@ -143,15 +218,10 @@ const Messages = () => {
           return;
         }
 
-        setMessages((prev) => [...prev, data.message]);
         if (data.conversation) {
-          setConversations((prev) => {
-            const others = prev.filter(
-              (conversation) => conversation.id !== data.conversation.id
-            );
-            return sortByUpdatedAt([...others, data.conversation]);
-          });
+          upsertConversation(data.conversation);
         }
+        loadMessages(activeConversationId, { silent: true });
         setMessageBody("");
       } catch (error) {
         toast.error(error?.response?.data?.message || error.message);
@@ -159,7 +229,7 @@ const Messages = () => {
         setSending(false);
       }
     },
-    [activeConversationId, axios, messageBody]
+    [activeConversationId, axios, loadMessages, messageBody, upsertConversation]
   );
 
   return (
@@ -240,7 +310,10 @@ const Messages = () => {
               ) : null}
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-4">
+            <div
+              ref={messageListRef}
+              className="flex-1 overflow-y-auto px-4 py-4"
+            >
               {loadingMessages && messages.length === 0 ? (
                 <p className="text-sm text-gray-500">Loading messages…</p>
               ) : null}

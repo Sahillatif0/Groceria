@@ -23,7 +23,7 @@ router.route("/stock").post(authSeller, updateProductHandler);
 router
   .route("/:id")
   .get(productByIdtHandler)
-  .patch(authSeller, updateProductHandler)
+  .patch(authSeller, upload.array("images", 6), updateProductHandler)
   .delete(authSeller, deleteProductHandler);
 
 export default router;

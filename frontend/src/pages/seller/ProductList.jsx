@@ -12,6 +12,8 @@ const EDIT_FORM_TEMPLATE = {
   inStock: true,
 };
 
+const MAX_IMAGES = 6;
+
 const ProductList = () => {
   const { sellerProducts, currency, axios, fetchSellerProducts } = UseAppContext();
   const [searchTerm, setSearchTerm] = useState("");
@@ -21,6 +23,9 @@ const ProductList = () => {
   const [editingProduct, setEditingProduct] = useState(null);
   const [editForm, setEditForm] = useState(() => ({ ...EDIT_FORM_TEMPLATE }));
   const [isSaving, setIsSaving] = useState(false);
+  const [existingImages, setExistingImages] = useState([]);
+  const [newImages, setNewImages] = useState([]);
+  const [deletingId, setDeletingId] = useState(null);
 
   const availableCategories = useMemo(() => {
     const unique = new Set(
@@ -35,6 +40,22 @@ const ProductList = () => {
     fetchSellerProducts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const releaseNewImagePreviews = (items) => {
+    items.forEach((item) => {
+      if (item?.preview) {
+        URL.revokeObjectURL(item.preview);
+      }
+    });
+  };
+
+  const resetEditorState = () => {
+    releaseNewImagePreviews(newImages);
+    setNewImages([]);
+    setExistingImages([]);
+    setEditingProduct(null);
+    setEditForm({ ...EDIT_FORM_TEMPLATE });
+  };
 
   const toggleStock = async (id, inStock) => {
     try {
@@ -51,6 +72,17 @@ const ProductList = () => {
   };
 
   const openEditor = (product) => {
+    releaseNewImagePreviews(newImages);
+    setNewImages([]);
+    setExistingImages(
+      Array.isArray(product.image)
+        ? product.image.filter(
+            (url) => typeof url === "string" && url.trim().length > 0
+          )
+        : typeof product.image === "string" && product.image.trim().length > 0
+        ? [product.image.trim()]
+        : []
+    );
     setEditingProduct(product);
     setEditForm({
       name: product.name ?? "",
@@ -68,12 +100,59 @@ const ProductList = () => {
     if (isSaving) {
       return;
     }
-    setEditingProduct(null);
-    setEditForm({ ...EDIT_FORM_TEMPLATE });
+    resetEditorState();
   };
 
   const handleFormChange = (field, value) => {
     setEditForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const removeExistingImage = (index) => {
+    setExistingImages((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const removeNewImage = (index) => {
+    setNewImages((prev) => {
+      if (index < 0 || index >= prev.length) {
+        return prev;
+      }
+
+      const target = prev[index];
+      if (target?.preview) {
+        URL.revokeObjectURL(target.preview);
+      }
+
+      return prev.filter((_, idx) => idx !== index);
+    });
+  };
+
+  const handleNewImageSelect = (event) => {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) {
+      return;
+    }
+
+    const currentCount = existingImages.length + newImages.length;
+    const availableSlots = MAX_IMAGES - currentCount;
+
+    if (availableSlots <= 0) {
+      toast.error(`You can upload up to ${MAX_IMAGES} images per product.`);
+      event.target.value = "";
+      return;
+    }
+
+    const limitedFiles = files.slice(0, availableSlots);
+    if (limitedFiles.length < files.length) {
+      toast.error(`Only ${availableSlots} more image${availableSlots === 1 ? "" : "s"} allowed.`);
+    }
+
+    const mappedFiles = limitedFiles.map((file) => ({
+      file,
+      preview: URL.createObjectURL(file),
+    }));
+
+    setNewImages((prev) => [...prev, ...mappedFiles]);
+    event.target.value = "";
   };
 
   const submitEdit = async (event) => {
@@ -95,27 +174,80 @@ const ProductList = () => {
       return;
     }
 
+    const filteredExistingImages = existingImages.filter(
+      (url) => typeof url === "string" && url.trim().length > 0
+    );
+
+    const targetId = editingProduct._id || editingProduct.id;
+    if (!targetId) {
+      toast.error("Unable to identify product");
+      return;
+    }
+
     setIsSaving(true);
     try {
-      const payload = {
+      const basePayload = {
         name: trimmedName,
         category: trimmedCategory,
         description: editForm.description,
         price: editForm.price,
         offerPrice: editForm.offerPrice,
         inStock: editForm.inStock,
+        existingImages: filteredExistingImages,
       };
 
-      const targetId = editingProduct._id || editingProduct.id;
-      await axios.patch(`/api/product/${targetId}`, payload);
+      const formData = new FormData();
+      formData.append("productData", JSON.stringify(basePayload));
+      newImages.forEach((item) => {
+        if (item?.file) {
+          formData.append("images", item.file);
+        }
+      });
+
+      await axios.patch(`/api/product/${targetId}`, formData);
+
       toast.success("Product updated");
       await fetchSellerProducts();
-      setEditingProduct(null);
-      setEditForm({ ...EDIT_FORM_TEMPLATE });
+      resetEditorState();
     } catch (error) {
       toast.error(error?.response?.data?.message || error.message);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const deleteProduct = async (product) => {
+    const productId = product?._id || product?.id;
+    if (!productId) {
+      toast.error("Unable to identify product");
+      return;
+    }
+
+    const confirmation = window.confirm(
+      `Remove "${product?.name ?? "this product"}" from your catalog?`
+    );
+
+    if (!confirmation) {
+      return;
+    }
+
+    try {
+      setDeletingId(productId);
+      const { data } = await axios.delete(`/api/product/${productId}`);
+      if (!data.success) {
+        toast.error(data.message || "Unable to remove product");
+        return;
+      }
+
+      toast.success(data.message || "Product removed");
+      if (editingProduct && (editingProduct._id || editingProduct.id) === productId) {
+        resetEditorState();
+      }
+      await fetchSellerProducts();
+    } catch (error) {
+      toast.error(error?.response?.data?.message || error.message);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -132,6 +264,8 @@ const ProductList = () => {
         return stockFilter === "in" ? product.inStock : !product.inStock;
       });
   }, [sellerProducts, searchTerm, categoryFilter, stockFilter]);
+
+  const totalImages = existingImages.length + newImages.length;
 
   return (
     <div className="no-scrollbar flex-1 h-[95vh] overflow-y-auto bg-gray-50">
@@ -303,6 +437,16 @@ const ProductList = () => {
                     >
                       Edit details
                     </button>
+                    <button
+                      onClick={() => deleteProduct(product)}
+                      type="button"
+                      disabled={deletingId === (product._id || product.id)}
+                      className="inline-flex items-center justify-center rounded-full border border-red-200 px-4 py-2 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {deletingId === (product._id || product.id)
+                        ? "Removing..."
+                        : "Remove"}
+                    </button>
                   </div>
                 </div>
               </article>
@@ -375,13 +519,25 @@ const ProductList = () => {
                       </label>
                     </td>
                     <td className="px-6 py-4 text-right">
-                      <button
-                        onClick={() => openEditor(product)}
-                        type="button"
-                        className="rounded-full border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10"
-                      >
-                        Edit
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => openEditor(product)}
+                          type="button"
+                          className="rounded-full border border-primary/40 px-3 py-2 text-xs font-medium text-primary transition hover:bg-primary/10"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => deleteProduct(product)}
+                          type="button"
+                          disabled={deletingId === (product._id || product.id)}
+                          className="rounded-full border border-red-200 px-3 py-2 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {deletingId === (product._id || product.id)
+                            ? "Removing..."
+                            : "Remove"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -445,6 +601,80 @@ const ProductList = () => {
                   </datalist>
                 </label>
               </div>
+
+              <section className="rounded-xl border border-dashed border-gray-200 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-gray-700">
+                    Product images
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    {totalImages}/{MAX_IMAGES}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  The first image appears as the cover on your storefront.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  {existingImages.map((image, index) => (
+                    <div
+                      key={`existing-${index}`}
+                      className="relative overflow-hidden rounded-lg border border-gray-200"
+                    >
+                      <img
+                        src={image}
+                        alt="Existing product"
+                        className="h-32 w-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeExistingImage(index)}
+                        className="absolute right-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[10px] font-semibold text-white transition hover:bg-black"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  {newImages.map((item, index) => (
+                    <div
+                      key={`new-${index}`}
+                      className="relative overflow-hidden rounded-lg border border-gray-200"
+                    >
+                      <img
+                        src={item.preview}
+                        alt="New upload preview"
+                        className="h-32 w-full object-cover"
+                      />
+                      <span className="absolute left-2 top-2 rounded-full bg-primary px-2 py-1 text-[10px] font-semibold text-white">
+                        New
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeNewImage(index)}
+                        className="absolute right-2 top-2 rounded-full bg-black/70 px-2 py-1 text-[10px] font-semibold text-white transition hover:bg-black"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  {totalImages < MAX_IMAGES ? (
+                    <label className="flex h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-gray-300 bg-gray-50 text-xs text-gray-600 transition hover:border-primary hover:bg-primary/5 hover:text-primary">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        hidden
+                        onChange={handleNewImageSelect}
+                      />
+                      <span className="text-sm font-semibold">Add images</span>
+                      <span className="text-[10px] text-gray-400">
+                        {MAX_IMAGES - totalImages} slot{MAX_IMAGES - totalImages === 1 ? "" : "s"} left
+                      </span>
+                    </label>
+                  ) : null}
+                </div>
+              </section>
 
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-gray-600">Description</span>
