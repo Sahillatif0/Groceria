@@ -27,10 +27,6 @@ import { stripeWebhook } from "./controllers/order.controller.js";
 import adminRouter from "./routes/admin.route.js";
 import chatRouter from "./routes/chat.route.js";
 
-// app.use("/", (req, res) => {
-//   res.send("fareed");
-// });
-
 app.use("/api/user", userRouter);
 app.use("/api/seller", sellerRouter);
 app.use("/api/product", productRouter);
