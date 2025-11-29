@@ -1,19 +1,31 @@
 import { v2 as cloudinary } from "cloudinary";
-import { getDb } from "../db/client.js";
-import { products as productsTable } from "../db/schema.js";
-import { and, eq } from "drizzle-orm";
-import { isValidUuid } from "../utils/validators.js";
+import { ProductModel } from "../models/index.js";
+import { isValidObjectId } from "../utils/validators.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
-const db = () => getDb();
+const toPlain = (doc) => (doc?.toObject ? doc.toObject() : doc) ?? null;
 
-const formatProduct = (product) =>
-  product
-    ? {
-        ...product,
-        _id: product.id,
-      }
-    : null;
+const formatProduct = (productDoc) => {
+  const payload = toPlain(productDoc);
+  if (!payload) {
+    return null;
+  }
+
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
+  const normalizedSellerId =
+    payload.seller?._id?.toString?.() ??
+    payload.seller?.toString?.() ??
+    payload.sellerId?.toString?.() ??
+    null;
+
+  return {
+    ...payload,
+    _id: id,
+    id,
+    seller: normalizedSellerId ?? payload.seller,
+    sellerId: normalizedSellerId,
+  };
+};
 
 export const addProductHandler = async (req, res) => {
   try {
@@ -47,23 +59,20 @@ export const addProductHandler = async (req, res) => {
         .json({ success: false, message: "Invalid price values" });
     }
 
-    const [createdProduct] = await db()
-      .insert(productsTable)
-      .values({
-        name: productData.name,
-        description: normalizedDescription,
-        price: priceValue,
-        offerPrice: offerValue,
-        image: imagesUrl,
-        category: productData.category,
-        inStock: productData?.inStock ?? true,
-        sellerId,
-      })
-      .returning();
+    const createdProduct = await ProductModel.create({
+      name: productData.name,
+      description: normalizedDescription,
+      price: priceValue,
+      offerPrice: offerValue,
+      image: imagesUrl,
+      category: productData.category,
+      inStock: productData?.inStock ?? true,
+      seller: sellerId,
+    });
 
     await recordTransactionLog({
       tableName: "products",
-      recordId: createdProduct.id,
+      recordId: createdProduct._id,
       operation: "PRODUCT_CREATED",
       actorId: req.user ?? null,
       actorRole: req.userRole ?? "seller",
@@ -71,7 +80,7 @@ export const addProductHandler = async (req, res) => {
         name: createdProduct.name,
         category: createdProduct.category,
         price: createdProduct.price,
-        sellerId: createdProduct.sellerId,
+        sellerId: createdProduct.seller,
       },
     });
 
@@ -93,10 +102,7 @@ export const addProductHandler = async (req, res) => {
 };
 export const productListHandler = async (req, res) => {
   try {
-    const products = await db()
-      .select()
-      .from(productsTable)
-      .where(eq(productsTable.isArchived, false));
+    const products = await ProductModel.find({ isArchived: false }).lean();
     res.status(200).json({
       success: true,
       products: products.map(formatProduct),
@@ -111,17 +117,16 @@ export const productByIdtHandler = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!isValidUuid(id)) {
+    if (!isValidObjectId(id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid product id" });
     }
 
-    const [product] = await db()
-      .select()
-      .from(productsTable)
-      .where(and(eq(productsTable.id, id), eq(productsTable.isArchived, false)))
-      .limit(1);
+    const product = await ProductModel.findOne({
+      _id: id,
+      isArchived: false,
+    }).lean();
     if (!product) {
       return res
         .status(404)
@@ -153,17 +158,13 @@ export const updateProductHandler = async (req, res) => {
     const incoming = rawPayload ? parsedUpdates : req.body ?? {};
     const { id: _ignoredId, existingImages, ...updates } = incoming;
 
-    if (!isValidUuid(productId)) {
+    if (!isValidObjectId(productId)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid product id" });
     }
 
-    const [productRecord] = await db()
-      .select()
-      .from(productsTable)
-      .where(eq(productsTable.id, productId))
-      .limit(1);
+    const productRecord = await ProductModel.findById(productId).lean();
 
     if (!productRecord) {
       return res
@@ -179,8 +180,8 @@ export const updateProductHandler = async (req, res) => {
 
     if (
       req.userRole === "seller" &&
-      productRecord.sellerId &&
-      productRecord.sellerId !== req.user
+      productRecord.seller &&
+      productRecord.seller.toString() !== req.user
     ) {
       return res
         .status(403)
@@ -250,7 +251,7 @@ export const updateProductHandler = async (req, res) => {
     }
 
     if (req.userRole === "admin" && updates.sellerId !== undefined) {
-      payload.sellerId = updates.sellerId;
+      payload.seller = updates.sellerId;
     }
 
     const uploadedImages = Array.isArray(req.files)
@@ -270,11 +271,11 @@ export const updateProductHandler = async (req, res) => {
       payload.image = finalImages;
     }
 
-    const [updatedProduct] = await db()
-      .update(productsTable)
-      .set(payload)
-      .where(eq(productsTable.id, productId))
-      .returning();
+    const updatedProduct = await ProductModel.findByIdAndUpdate(
+      productId,
+      payload,
+      { new: true, lean: true }
+    );
 
     await recordTransactionLog({
       tableName: "products",
@@ -307,17 +308,13 @@ export const deleteProductHandler = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!isValidUuid(id)) {
+    if (!isValidObjectId(id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid product id" });
     }
 
-    const [productRecord] = await db()
-      .select()
-      .from(productsTable)
-      .where(eq(productsTable.id, id))
-      .limit(1);
+    const productRecord = await ProductModel.findById(id).lean();
 
     if (!productRecord) {
       return res
@@ -333,8 +330,8 @@ export const deleteProductHandler = async (req, res) => {
 
     if (
       req.userRole === "seller" &&
-      productRecord.sellerId &&
-      productRecord.sellerId !== req.user
+      productRecord.seller &&
+      productRecord.seller.toString() !== req.user
     ) {
       return res
         .status(403)
@@ -347,15 +344,15 @@ export const deleteProductHandler = async (req, res) => {
         .json({ success: false, message: "Product already archived" });
     }
 
-    const [archivedProduct] = await db()
-      .update(productsTable)
-      .set({ isArchived: true, updatedAt: new Date() })
-      .where(eq(productsTable.id, id))
-      .returning();
+    const archivedProduct = await ProductModel.findByIdAndUpdate(
+      id,
+      { isArchived: true, updatedAt: new Date() },
+      { new: true, lean: true }
+    );
 
     await recordTransactionLog({
       tableName: "products",
-      recordId: archivedProduct.id,
+      recordId: archivedProduct._id,
       operation: "PRODUCT_ARCHIVED",
       actorId: req.user ?? null,
       actorRole: req.userRole ?? null,
@@ -376,12 +373,10 @@ export const productListForSellerHandler = async (req, res) => {
   try {
     const sellerId = req.user;
 
-    const products = await db()
-      .select()
-      .from(productsTable)
-      .where(
-        and(eq(productsTable.isArchived, false), eq(productsTable.sellerId, sellerId))
-      );
+    const products = await ProductModel.find({
+      isArchived: false,
+      seller: sellerId,
+    }).lean();
 
     res.status(200).json({
       success: true,

@@ -1,30 +1,28 @@
 import stripe from "stripe";
-import { getDb } from "../db/client.js";
 import {
-  orders,
-  orderItems,
-  products,
-  addresses,
-  users,
-} from "../db/schema.js";
-import { eq, inArray, and, or, desc } from "drizzle-orm";
-import { isValidUuid } from "../utils/validators.js";
+  OrderModel,
+  OrderItemModel,
+  ProductModel,
+  AddressModel,
+  UserModel,
+} from "../models/index.js";
+import { isValidObjectId } from "../utils/validators.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
-const db = () => getDb();
+const toPlain = (doc) => (doc?.toObject ? doc.toObject() : doc);
 
 const buildProductsMap = async (productIds) => {
   if (!productIds.length) {
     return new Map();
   }
 
-  const rows = await db()
-    .select()
-    .from(products)
-    .where(and(inArray(products.id, productIds), eq(products.isArchived, false)));
+  const rows = await ProductModel.find({
+    _id: { $in: productIds },
+    isArchived: false,
+  }).lean();
 
   return new Map(
-    rows.map((item) => [item.id, { ...item, _id: item.id }])
+    rows.map((item) => [item._id.toString(), { ...item, _id: item._id.toString() }])
   );
 };
 
@@ -33,62 +31,56 @@ const attachOrderRelations = async (ordersList) => {
     return [];
   }
 
-  const orderIds = ordersList.map((order) => order.id);
+  const normalizedOrders = ordersList.map((order) => toPlain(order));
+  const orderIds = normalizedOrders.map((order) => order._id.toString());
 
-  const itemsRows = await db()
-    .select()
-    .from(orderItems)
-    .where(inArray(orderItems.orderId, orderIds));
+  const itemsRows = await OrderItemModel.find({ order: { $in: orderIds } }).lean();
 
-  const addressesRows = await db()
-    .select()
-    .from(addresses)
-    .where(
-      inArray(
-        addresses.id,
-        Array.from(new Set(ordersList.map((order) => order.addressId)))
-      )
-    );
+  const addressIds = Array.from(
+    new Set(
+      normalizedOrders
+        .map((order) => order.address?.toString())
+        .filter(Boolean)
+    )
+  );
+
+  const addressesRows = addressIds.length
+    ? await AddressModel.find({ _id: { $in: addressIds } }).lean()
+    : [];
 
   const productIds = Array.from(
-    new Set(itemsRows.map((item) => item.productId))
+    new Set(itemsRows.map((item) => item.product?.toString()).filter(Boolean))
   );
 
   const productsRows = productIds.length
-    ? await db()
-        .select()
-        .from(products)
-        .where(inArray(products.id, productIds))
+    ? await ProductModel.find({ _id: { $in: productIds } }).lean()
     : [];
 
-  const addressMap = new Map(addressesRows.map((addr) => [addr.id, addr]));
+  const addressMap = new Map(
+    addressesRows.map((addr) => [addr._id.toString(), { ...addr, _id: addr._id.toString() }])
+  );
   const productMap = new Map(
-    productsRows.map((prod) => [prod.id, { ...prod, _id: prod.id }])
+    productsRows.map((prod) => [prod._id.toString(), { ...prod, _id: prod._id.toString() }])
   );
   const itemsByOrder = new Map();
 
   itemsRows.forEach((item) => {
-    const list = itemsByOrder.get(item.orderId) ?? [];
+    const orderKey = item.order.toString();
+    const list = itemsByOrder.get(orderKey) ?? [];
     list.push({
       ...item,
-      product: productMap.get(item.productId) ?? null,
+      _id: item._id.toString(),
+      product: productMap.get(item.product?.toString() ?? "") ?? null,
     });
-    itemsByOrder.set(item.orderId, list);
+    itemsByOrder.set(orderKey, list);
   });
 
-  return ordersList.map((order) => ({
+  return normalizedOrders.map((order) => ({
     ...order,
-    address: addressMap.get(order.addressId)
-      ? {
-          ...addressMap.get(order.addressId),
-          _id: addressMap.get(order.addressId).id,
-        }
-      : null,
-    items: (itemsByOrder.get(order.id) ?? []).map((item) => ({
-      ...item,
-      _id: item.id,
-    })),
-    _id: order.id,
+    _id: order._id.toString(),
+    id: order._id.toString(),
+    address: addressMap.get(order.address?.toString() ?? "") ?? null,
+    items: itemsByOrder.get(order._id.toString()) ?? [],
   }));
 };
 
@@ -110,13 +102,10 @@ export const placeOrderHandler = async (req, res) => {
         .json({ success: false, message: "One or more products not found" });
     }
 
-    const [shippingAddress] = await db()
-      .select()
-      .from(addresses)
-      .where(
-        and(eq(addresses.id, address), eq(addresses.userId, userId))
-      )
-      .limit(1);
+    const shippingAddress = await AddressModel.findOne({
+      _id: address,
+      user: userId,
+    }).lean();
 
     if (!shippingAddress) {
       return res
@@ -131,33 +120,30 @@ export const placeOrderHandler = async (req, res) => {
 
     const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    const [newOrder] = await db()
-      .insert(orders)
-      .values({
-        userId,
-        amount,
-        addressId: shippingAddress.id,
-        paymentType: "COD",
-      })
-      .returning({ id: orders.id });
+    const newOrder = await OrderModel.create({
+      user: userId,
+      amount,
+      address: shippingAddress._id,
+      paymentType: "COD",
+    });
 
-    await db().insert(orderItems).values(
+    await OrderItemModel.insertMany(
       items.map((item) => ({
-        orderId: newOrder.id,
-        productId: item.product,
+        order: newOrder._id,
+        product: item.product,
         quantity: item.quantity,
       }))
     );
 
     await recordTransactionLog({
       tableName: "orders",
-      recordId: newOrder.id,
+      recordId: newOrder._id,
       operation: "ORDER_PLACED_COD",
       actorId: userId,
       actorRole: req.userRole ?? "customer",
       afterData: {
         amount,
-        addressId: shippingAddress.id,
+        addressId: shippingAddress._id,
         itemCount: items.length,
       },
     });
@@ -189,13 +175,10 @@ export const placeOrderStripeHandler = async (req, res) => {
         .json({ success: false, message: "One or more products not found" });
     }
 
-    const [shippingAddress] = await db()
-      .select()
-      .from(addresses)
-      .where(
-        and(eq(addresses.id, address), eq(addresses.userId, userId))
-      )
-      .limit(1);
+    const shippingAddress = await AddressModel.findOne({
+      _id: address,
+      user: userId,
+    }).lean();
 
     if (!shippingAddress) {
       return res
@@ -218,33 +201,30 @@ export const placeOrderStripeHandler = async (req, res) => {
 
     const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    const [order] = await db()
-      .insert(orders)
-      .values({
-        userId,
-        amount,
-        addressId: shippingAddress.id,
-        paymentType: "Online",
-      })
-      .returning({ id: orders.id });
+    const order = await OrderModel.create({
+      user: userId,
+      amount,
+      address: shippingAddress._id,
+      paymentType: "Online",
+    });
 
-    await db().insert(orderItems).values(
+    await OrderItemModel.insertMany(
       items.map((item) => ({
-        orderId: order.id,
-        productId: item.product,
+        order: order._id,
+        product: item.product,
         quantity: item.quantity,
       }))
     );
 
     await recordTransactionLog({
       tableName: "orders",
-      recordId: order.id,
+      recordId: order._id,
       operation: "ORDER_PLACED_STRIPE",
       actorId: userId,
       actorRole: req.userRole ?? "customer",
       afterData: {
         amount,
-        addressId: shippingAddress.id,
+        addressId: shippingAddress._id,
         itemCount: items.length,
       },
     });
@@ -270,7 +250,7 @@ export const placeOrderStripeHandler = async (req, res) => {
       success_url: `${origin}/loader?next=my-orders`,
       cancel_url: `${origin}/cart`,
       metadata: {
-        orderId: order.id,
+        orderId: order._id.toString(),
         userId,
       },
     });
@@ -311,14 +291,14 @@ export const stripeWebhook = async (req, res) => {
         const { orderId, userId } = session.data[0].metadata;
 
         await Promise.all([
-          db()
-            .update(orders)
-            .set({ isPaid: true, updatedAt: new Date() })
-            .where(eq(orders.id, orderId)),
-          db()
-            .update(users)
-            .set({ cartItems: {}, updatedAt: new Date() })
-            .where(eq(users.id, userId)),
+          OrderModel.findByIdAndUpdate(orderId, {
+            isPaid: true,
+            updatedAt: new Date(),
+          }),
+          UserModel.findByIdAndUpdate(userId, {
+            cartItems: {},
+            updatedAt: new Date(),
+          }),
         ]);
 
         await recordTransactionLog({
@@ -354,16 +334,12 @@ export const stripeWebhook = async (req, res) => {
 export const getUserOrdersHandler = async (req, res) => {
   try {
     const userId = req.user;
-    const orderList = await db()
-      .select()
-      .from(orders)
-      .where(
-        and(
-          eq(orders.userId, userId),
-          or(eq(orders.paymentType, "COD"), eq(orders.isPaid, true))
-        )
-      )
-      .orderBy(desc(orders.createdAt));
+    const orderList = await OrderModel.find({
+      user: userId,
+      $or: [{ paymentType: "COD" }, { isPaid: true }],
+    })
+      .sort({ createdAt: -1 })
+      .lean();
 
     const hydratedOrders = await attachOrderRelations(orderList);
 
@@ -379,33 +355,38 @@ export const getSellerOrdersHandler = async (req, res) => {
   try {
     const sellerId = req.user;
 
-    const itemRows = await db()
-      .select({
-        orderId: orderItems.orderId,
-        productSellerId: products.sellerId,
-      })
-      .from(orderItems)
-      .innerJoin(products, eq(orderItems.productId, products.id))
-      .where(eq(products.sellerId, sellerId));
+    const sellerProducts = await ProductModel.find({ seller: sellerId })
+      .select({ _id: 1 })
+      .lean();
 
-    const orderIds = Array.from(new Set(itemRows.map((row) => row.orderId)));
+    const productIds = sellerProducts.map((prod) => prod._id.toString());
+
+    if (!productIds.length) {
+      return res.status(200).json({ success: true, orders: [] });
+    }
+
+    const itemRows = await OrderItemModel.find({
+      product: { $in: productIds },
+    })
+      .select({ order: 1, product: 1 })
+      .lean();
+
+    const orderIds = Array.from(new Set(itemRows.map((row) => row.order.toString())));
 
     if (!orderIds.length) {
       return res.status(200).json({ success: true, orders: [] });
     }
 
-    const orderList = await db()
-      .select()
-      .from(orders)
-      .where(inArray(orders.id, orderIds))
-      .orderBy(desc(orders.createdAt));
+    const orderList = await OrderModel.find({ _id: { $in: orderIds } })
+      .sort({ createdAt: -1 })
+      .lean();
 
     const hydratedOrders = await attachOrderRelations(orderList);
 
     const filteredOrders = hydratedOrders.map((order) => ({
       ...order,
       items: order.items.filter(
-        (item) => item.product?.sellerId === sellerId
+        (item) => item.product?.seller?.toString?.() === sellerId
       ),
     }));
 
@@ -420,19 +401,15 @@ export const cancelUserOrderHandler = async (req, res) => {
     const { orderId } = req.params;
     const userId = req.user;
 
-    if (!isValidUuid(orderId)) {
+    if (!isValidObjectId(orderId)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const [orderRecord] = await db()
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
+    const orderRecord = await OrderModel.findById(orderId).lean();
 
-    if (!orderRecord || orderRecord.userId !== userId) {
+    if (!orderRecord || orderRecord.user?.toString() !== userId) {
       return res
         .status(404)
         .json({ success: false, message: "Order not found" });
@@ -467,10 +444,11 @@ export const cancelUserOrderHandler = async (req, res) => {
       });
     }
 
-    await db()
-      .update(orders)
-      .set({ status: "Cancelled", cancelledAt: new Date(), updatedAt: new Date() })
-      .where(eq(orders.id, orderId));
+    await OrderModel.findByIdAndUpdate(orderId, {
+      status: "Cancelled",
+      cancelledAt: new Date(),
+      updatedAt: new Date(),
+    });
 
     await recordTransactionLog({
       tableName: "orders",

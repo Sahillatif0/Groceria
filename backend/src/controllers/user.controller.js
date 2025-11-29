@@ -1,21 +1,22 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { UserModel } from "../models/index.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
-const db = () => getDb();
-
-const sanitizeUser = (userRecord) => {
+const toPublicUser = (userRecord) => {
   if (!userRecord) {
     return null;
   }
 
-  const { password, ...rest } = userRecord;
+  const payload = userRecord.toObject ? userRecord.toObject() : userRecord;
+  const { password, ...rest } = payload;
+
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
+
   return {
     ...rest,
-    _id: userRecord.id,
+    _id: id,
+    id,
   };
 };
 
@@ -28,11 +29,7 @@ export const registerHandler = async (req, res) => {
         .json({ success: false, message: "invalid credentials" });
     }
 
-    const [existedUser] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const existedUser = await UserModel.findOne({ email }).lean();
 
     if (existedUser) {
       return res
@@ -42,16 +39,13 @@ export const registerHandler = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const [createdUser] = await db()
-      .insert(users)
-      .values({ name, email, password: hashedPassword })
-      .returning();
+    const createdUser = await UserModel.create({ name, email, password: hashedPassword });
 
     await recordTransactionLog({
       tableName: "users",
-      recordId: createdUser.id,
+      recordId: createdUser._id,
       operation: "USER_REGISTERED",
-      actorId: createdUser.id,
+      actorId: createdUser._id,
       actorRole: createdUser.role,
       afterData: {
         name: createdUser.name,
@@ -61,10 +55,10 @@ export const registerHandler = async (req, res) => {
     });
 
     const token = jwt.sign(
-      { id: createdUser.id, role: createdUser.role },
+      { id: createdUser._id.toString(), role: createdUser.role },
       process.env.ACCESS_TOKEN_SECRET,
       {
-      expiresIn: "7d",
+        expiresIn: "7d",
       }
     );
 
@@ -77,13 +71,7 @@ export const registerHandler = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      user: {
-        name: createdUser.name,
-        email: createdUser.email,
-        _id: createdUser.id,
-        id: createdUser.id,
-        role: createdUser.role,
-      },
+      user: toPublicUser(createdUser),
       message: "User registered successfully",
     });
   } catch (error) {
@@ -101,11 +89,7 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Email and Password required" });
     }
 
-    const [user] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const user = await UserModel.findOne({ email }).lean();
 
     if (!user) {
       return res
@@ -126,7 +110,7 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Password does not matched" });
     }
 
-    const token = jwt.sign({ id: user.id, role: user.role }, process.env.ACCESS_TOKEN_SECRET, {
+    const token = jwt.sign({ id: user._id.toString(), role: user.role }, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "7d",
     });
 
@@ -139,13 +123,7 @@ export const loginHandler = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      user: {
-        name: user.name,
-        email: user.email,
-        _id: user.id,
-        id: user.id,
-        role: user.role,
-      },
+      user: toPublicUser(user),
       message: "User LoggedIn successfully",
     });
   } catch (error) {
@@ -156,13 +134,9 @@ export const loginHandler = async (req, res) => {
 
 export const isAuth = async (req, res) => {
   try {
-    const [user] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, req.user))
-      .limit(1);
+    const user = await UserModel.findById(req.user).lean();
 
-    return res.status(200).json({ success: true, user: sanitizeUser(user) });
+    return res.status(200).json({ success: true, user: toPublicUser(user) });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });

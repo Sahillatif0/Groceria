@@ -1,9 +1,7 @@
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import { connectDb } from "../config/db.js";
-import { getDb } from "./client.js";
-import { users } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { UserModel } from "../models/index.js";
 
 dotenv.config();
 
@@ -16,31 +14,23 @@ const seedAdmin = async () => {
   }
 
   await connectDb();
-  const db = getDb();
 
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, ADMIN_EMAIL))
-    .limit(1);
+  const existing = await UserModel.findOne({ email: ADMIN_EMAIL }).lean();
 
   const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 10);
 
   if (existing) {
-    await db
-      .update(users)
-      .set({
-        name: ADMIN_NAME,
-        password: hashedPassword,
-        role: "admin",
-        isActive: true,
-        updatedAt: new Date(),
-      })
-      .where(eq(users.id, existing.id));
+    await UserModel.findByIdAndUpdate(existing._id, {
+      name: ADMIN_NAME,
+      password: hashedPassword,
+      role: "admin",
+      isActive: true,
+      updatedAt: new Date(),
+    });
 
     console.log(`Updated existing admin user ${ADMIN_EMAIL}`);
   } else {
-    await db.insert(users).values({
+    await UserModel.create({
       name: ADMIN_NAME,
       email: ADMIN_EMAIL,
       password: hashedPassword,

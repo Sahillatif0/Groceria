@@ -1,7 +1,5 @@
 import jwt from "jsonwebtoken";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { UserModel } from "../models/index.js";
 
 export const authUser = async (req, res, next) => {
   const { token } = req.cookies;
@@ -20,15 +18,9 @@ export const authUser = async (req, res, next) => {
         .json({ success: false, message: "Invalid token payload" });
     }
 
-    const [userRecord] = await getDb()
-      .select({
-        id: users.id,
-        role: users.role,
-        isActive: users.isActive,
-      })
-      .from(users)
-      .where(eq(users.id, decodedToken.id))
-      .limit(1);
+    const userRecord = await UserModel.findById(decodedToken.id)
+      .select({ role: 1, isActive: 1 })
+      .lean();
 
     if (!userRecord) {
       return res
@@ -42,7 +34,7 @@ export const authUser = async (req, res, next) => {
         .json({ success: false, message: "User account is inactive" });
     }
 
-    req.user = userRecord.id;
+    req.user = userRecord._id.toString();
     req.userRole = userRecord.role;
 
     next();

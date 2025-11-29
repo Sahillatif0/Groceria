@@ -1,5 +1,5 @@
-import { getDb } from "../db/client.js";
-import { transactionLogs } from "../db/schema.js";
+import { TransactionLogModel } from "../models/index.js";
+import { isValidObjectId, toObjectId } from "./validators.js";
 
 const buildMetadata = ({ actorId, actorRole, description, payload }) => {
   const meta = {};
@@ -33,16 +33,17 @@ export const recordTransactionLog = async ({
       description,
       payload,
     });
+    const normalizedRecordId = isValidObjectId(recordId)
+      ? toObjectId(recordId)
+      : null;
 
-    await getDb()
-      .insert(transactionLogs)
-      .values({
-        tableName,
-        recordId,
-        operation,
-        beforeData: beforeData ?? null,
-        afterData: afterData ?? metadata,
-      });
+    await TransactionLogModel.create({
+      tableName,
+      recordId: normalizedRecordId,
+      operation,
+      beforeData: beforeData ?? null,
+      afterData: afterData ?? metadata,
+    });
   } catch (error) {
     console.error("Failed to record transaction log", error.message);
   }

@@ -11,7 +11,10 @@ const Messages = () => {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messageBody, setMessageBody] = useState("");
   const [sending, setSending] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState([]);
   const messageListRef = useRef(null);
+  const attachmentInputRef = useRef(null);
+  const maxAttachments = 4;
 
   const activeConversation = useMemo(
     () => conversations.find((item) => item.id === activeConversationId) || null,
@@ -122,6 +125,16 @@ const Messages = () => {
     connectSocket?.();
   }, [connectSocket]);
 
+  useEffect(() => {
+    return () => {
+      pendingAttachments.forEach((attachment) => {
+        if (attachment?.preview) {
+          URL.revokeObjectURL(attachment.preview);
+        }
+      });
+    };
+  }, [pendingAttachments]);
+
   const socketConnected = socket?.connected ?? false;
 
   const scrollToBottom = useCallback(() => {
@@ -193,6 +206,64 @@ const Messages = () => {
     };
   }, [activeConversation, activeConversationId, loadMessages, socket, upsertConversation]);
 
+  const clearAttachments = useCallback(() => {
+    setPendingAttachments((previous) => {
+      previous.forEach((item) => {
+        if (item?.preview) {
+          URL.revokeObjectURL(item.preview);
+        }
+      });
+      return [];
+    });
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
+    }
+  }, []);
+
+  const handleAttachmentChange = useCallback((event) => {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) {
+      return;
+    }
+
+    setPendingAttachments((previous) => {
+      const next = [...previous];
+      files.forEach((file) => {
+        if (!file || next.length >= maxAttachments) {
+          return;
+        }
+        next.push({
+          id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+          file,
+          preview: URL.createObjectURL(file),
+        });
+      });
+      return next.slice(0, maxAttachments);
+    });
+
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
+    } else {
+      event.target.value = "";
+    }
+  }, [maxAttachments]);
+
+  const removeAttachment = useCallback((attachmentId) => {
+    setPendingAttachments((previous) => {
+      const target = previous.find((item) => item.id === attachmentId);
+      if (target?.preview) {
+        URL.revokeObjectURL(target.preview);
+      }
+      return previous.filter((item) => item.id !== attachmentId);
+    });
+
+    if (attachmentInputRef.current) {
+      attachmentInputRef.current.value = "";
+    }
+  }, []);
+
+  const canSendMessage = Boolean(messageBody.trim() || pendingAttachments.length);
+
   const handleSend = useCallback(
     async (event) => {
       event?.preventDefault?.();
@@ -202,16 +273,23 @@ const Messages = () => {
         return;
       }
 
-      if (!messageBody.trim()) {
+      const trimmedMessage = messageBody.trim();
+      if (!trimmedMessage && pendingAttachments.length === 0) {
         return;
       }
 
       try {
         setSending(true);
-        const { data } = await axios.post("/api/chat/seller/send", {
-          conversationId: activeConversationId,
-          message: messageBody.trim(),
+        const formData = new FormData();
+        formData.append("conversationId", activeConversationId);
+        if (trimmedMessage) {
+          formData.append("message", trimmedMessage);
+        }
+        pendingAttachments.forEach(({ file }) => {
+          formData.append("attachments", file);
         });
+
+        const { data } = await axios.post("/api/chat/seller/send", formData);
 
         if (!data.success) {
           toast.error(data.message || "Unable to send message");
@@ -223,13 +301,22 @@ const Messages = () => {
         }
         loadMessages(activeConversationId, { silent: true });
         setMessageBody("");
+        clearAttachments();
       } catch (error) {
         toast.error(error?.response?.data?.message || error.message);
       } finally {
         setSending(false);
       }
     },
-    [activeConversationId, axios, loadMessages, messageBody, upsertConversation]
+    [
+      activeConversationId,
+      axios,
+      clearAttachments,
+      loadMessages,
+      messageBody,
+      pendingAttachments,
+      upsertConversation,
+    ]
   );
 
   return (
@@ -264,7 +351,8 @@ const Messages = () => {
               const isActive = conversation.id === activeConversationId;
               const customerName =
                 conversation.customer?.name ?? "Customer";
-              const lastSnippet = conversation.lastMessage?.body ?? "";
+              const lastSnippet = (conversation.lastMessage?.body || "").trim()
+                || (conversation.lastMessage?.attachments?.length ? "[Photo]" : "");
 
               return (
                 <li key={conversation.id} className="md:px-0 md:py-0">
@@ -328,6 +416,7 @@ const Messages = () => {
                 {messages.map((message) => {
                   const mine =
                     message.senderId === activeConversation.sellerId;
+                  const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
                   return (
                     <div
                       key={message.id}
@@ -340,9 +429,32 @@ const Messages = () => {
                             : "bg-gray-100 text-gray-800"
                         }`}
                       >
-                        <p className="whitespace-pre-wrap break-words">
-                          {message.body}
-                        </p>
+                        {message.body ? (
+                          <p className="whitespace-pre-wrap break-words">
+                            {message.body}
+                          </p>
+                        ) : null}
+                        {hasAttachments ? (
+                          <div
+                            className={`${message.body ? "mt-2" : ""} grid grid-cols-2 gap-2`}
+                          >
+                            {message.attachments.map((attachment, index) => (
+                              <a
+                                key={attachment.publicId ?? attachment.url ?? index}
+                                href={attachment.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block overflow-hidden rounded-lg border border-white/20 bg-white/10"
+                              >
+                                <img
+                                  src={attachment.url}
+                                  alt="Shared attachment"
+                                  className="h-32 w-full object-cover"
+                                />
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
                         <p className="mt-1 text-[10px] opacity-80">
                           {new Date(message.createdAt).toLocaleString()}
                         </p>
@@ -357,22 +469,69 @@ const Messages = () => {
               onSubmit={handleSend}
               className="border-t border-gray-200 bg-gray-50 px-4 py-3"
             >
-              <div className="flex items-end gap-3">
-                <textarea
-                  rows={2}
-                  value={messageBody}
-                  onChange={(event) => setMessageBody(event.target.value)}
-                  placeholder="Write your reply…"
-                  className="flex-1 resize-none rounded-md border border-gray-300 p-3 text-sm outline-primary"
-                  disabled={sending}
-                ></textarea>
-                <button
-                  type="submit"
-                  disabled={sending || !messageBody.trim()}
-                  className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-secondary-dull disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {sending ? "Sending…" : "Send"}
-                </button>
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleAttachmentChange}
+                disabled={sending}
+              />
+              <div className="flex flex-col gap-3">
+                {pendingAttachments.length > 0 ? (
+                  <div className="flex flex-wrap gap-3">
+                    {pendingAttachments.map((attachment) => (
+                      <div
+                        key={attachment.id}
+                        className="relative h-20 w-20 overflow-hidden rounded-md border border-dashed border-gray-300"
+                      >
+                        <img
+                          src={attachment.preview}
+                          alt="Selected attachment"
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(attachment.id)}
+                          className="absolute right-1 top-1 rounded-full bg-black/60 px-1 text-[10px] text-white"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="flex items-end gap-3">
+                  <div className="flex-1">
+                    <textarea
+                      rows={2}
+                      value={messageBody}
+                      onChange={(event) => setMessageBody(event.target.value)}
+                      placeholder="Write your reply…"
+                      className="w-full resize-none rounded-md border border-gray-300 p-3 text-sm outline-primary"
+                      disabled={sending}
+                    ></textarea>
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-500">
+                      <button
+                        type="button"
+                        onClick={() => attachmentInputRef.current?.click()}
+                        disabled={sending || pendingAttachments.length >= maxAttachments}
+                        className="rounded-full border border-dashed border-gray-400 px-3 py-1 text-xs font-medium text-gray-600 transition hover:border-gray-600 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Add image
+                      </button>
+                      <span>{pendingAttachments.length}/{maxAttachments} images</span>
+                    </div>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={sending || !canSendMessage}
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-secondary-dull disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {sending ? "Sending…" : "Send"}
+                  </button>
+                </div>
               </div>
             </form>
           </>

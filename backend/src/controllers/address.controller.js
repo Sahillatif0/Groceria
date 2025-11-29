@@ -1,22 +1,15 @@
-import { addresses as addressesTable } from "../db/schema.js";
-import { getDb } from "../db/client.js";
-import { eq } from "drizzle-orm";
+import { AddressModel } from "../models/index.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
-
-const db = () => getDb();
 
 export const addAddressHandler = async (req, res) => {
   try {
     const userId = req.user; // Use authenticated user ID
     const { address } = req.body;
-    const [createdAddress] = await db()
-      .insert(addressesTable)
-      .values({ ...address, userId })
-      .returning();
+    const createdAddress = await AddressModel.create({ ...address, user: userId });
 
     await recordTransactionLog({
       tableName: "addresses",
-      recordId: createdAddress.id,
+      recordId: createdAddress._id,
       operation: "ADDRESS_CREATED",
       actorId: userId,
       actorRole: req.userRole ?? "customer",
@@ -33,7 +26,7 @@ export const addAddressHandler = async (req, res) => {
       message: "Address added successfully",
       address: {
         ...createdAddress,
-        _id: createdAddress.id,
+        _id: createdAddress._id.toString(),
       },
     });
   } catch (error) {
@@ -45,14 +38,12 @@ export const addAddressHandler = async (req, res) => {
 export const getAddressHandler = async (req, res) => {
   try {
     const userId = req.user;
-    const userAddresses = await db()
-      .select()
-      .from(addressesTable)
-      .where(eq(addressesTable.userId, userId));
+    const userAddresses = await AddressModel.find({ user: userId }).lean();
 
     const formatted = userAddresses.map((item) => ({
       ...item,
-      _id: item.id,
+      _id: item._id.toString(),
+      id: item._id.toString(),
     }));
 
     res.status(200).json({ success: true, addresses: formatted });

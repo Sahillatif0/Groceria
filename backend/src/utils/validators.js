@@ -1,3 +1,5 @@
+import mongoose from "mongoose";
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const isValidUuid = (value) => {
@@ -7,3 +9,8 @@ export const isValidUuid = (value) => {
 
   return UUID_REGEX.test(value.trim());
 };
+
+export const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+export const toObjectId = (value) =>
+  isValidObjectId(value) ? new mongoose.Types.ObjectId(value) : null;

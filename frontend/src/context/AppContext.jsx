@@ -108,7 +108,7 @@ export const AppContextProvider = ({ children }) => {
 
       if (data.success) {
         setUser(data.user);
-        setCartItems(data.user.cartItems);
+        setCartItems(data.user.cartItems ?? {});
         const role = data.user?.role;
         setIsSeller(role === "seller" || role === "admin");
         setIsAdmin(role === "admin");

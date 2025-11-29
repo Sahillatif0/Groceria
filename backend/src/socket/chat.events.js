@@ -1,7 +1,5 @@
-import { eq } from "drizzle-orm";
-import { getDb } from "../db/client.js";
-import { chatConversations } from "../db/schema.js";
-import { isValidUuid } from "../utils/validators.js";
+import { ChatConversationModel } from "../models/index.js";
+import { isValidObjectId } from "../utils/validators.js";
 
 let ioInstance = null;
 
@@ -20,21 +18,19 @@ export const userRoom = (userId) => `user:${userId}`;
 export const conversationRoom = (conversationId) => `conversation:${conversationId}`;
 
 const ensureConversationAccess = async ({ conversationId, userId }) => {
-  const [conversation] = await getDb()
-    .select({
-      id: chatConversations.id,
-      userId: chatConversations.userId,
-      sellerId: chatConversations.sellerId,
-    })
-    .from(chatConversations)
-    .where(eq(chatConversations.id, conversationId))
-    .limit(1);
+  const conversation = await ChatConversationModel.findById(conversationId)
+    .select({ user: 1, seller: 1 })
+    .lean();
 
   if (!conversation) {
     throw new Error("Conversation not found");
   }
 
-  if (conversation.userId !== userId && conversation.sellerId !== userId) {
+  const userIdString = userId?.toString();
+  if (
+    userIdString !== conversation.user?.toString() &&
+    userIdString !== conversation.seller?.toString()
+  ) {
     throw new Error("Access denied");
   }
 
@@ -45,7 +41,7 @@ export const registerChatHandlers = (socket) => {
   socket.on("chat:join", async (payload, callback) => {
     try {
       const conversationId = payload?.conversationId;
-      if (!conversationId || !isValidUuid(conversationId)) {
+      if (!conversationId || !isValidObjectId(conversationId)) {
         throw new Error("Invalid conversation id");
       }
 

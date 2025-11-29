@@ -1,5 +1,5 @@
-import { getDb } from "../db/client.js";
-import { adminAuditLogs } from "../db/schema.js";
+import { AdminAuditLogModel } from "../models/index.js";
+import { isValidObjectId, toObjectId } from "./validators.js";
 
 export const recordAdminAction = async ({
   adminId,
@@ -9,15 +9,13 @@ export const recordAdminAction = async ({
   metadata = {},
 }) => {
   try {
-    await getDb()
-      .insert(adminAuditLogs)
-      .values({
-        adminId: adminId ?? null,
-        action,
-        targetType,
-        targetId,
-        metadata,
-      });
+    await AdminAuditLogModel.create({
+      admin: isValidObjectId(adminId) ? toObjectId(adminId) : null,
+      action,
+      targetType,
+      targetId,
+      metadata,
+    });
   } catch (error) {
     console.error("Failed to record admin audit log", error.message);
   }

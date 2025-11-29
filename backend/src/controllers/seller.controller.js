@@ -1,8 +1,6 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
-import { getDb } from "../db/client.js";
-import { users, sellers } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { UserModel, SellerModel } from "../models/index.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
 const sanitizeUser = (userRecord) => {
@@ -10,10 +8,13 @@ const sanitizeUser = (userRecord) => {
     return null;
   }
 
-  const { password, ...rest } = userRecord;
+  const payload = userRecord.toObject ? userRecord.toObject() : userRecord;
+  const { password, ...rest } = payload;
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
   return {
     ...rest,
-    _id: userRecord.id,
+    _id: id,
+    id,
   };
 };
 
@@ -22,9 +23,15 @@ const sanitizeSellerProfile = (profileRecord) => {
     return null;
   }
 
+  const payload = profileRecord.toObject
+    ? profileRecord.toObject()
+    : profileRecord;
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
+
   return {
-    ...profileRecord,
-    _id: profileRecord.id,
+    ...payload,
+    _id: id,
+    id,
   };
 };
 
@@ -55,11 +62,7 @@ export const sellerLoginHandler = async (req, res) => {
         .json({ success: false, message: "Email and password required" });
     }
 
-    const [userRecord] = await getDb()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const userRecord = await UserModel.findOne({ email });
 
     if (!userRecord || !["seller", "admin"].includes(userRecord.role)) {
       return res
@@ -81,11 +84,7 @@ export const sellerLoginHandler = async (req, res) => {
         .json({ success: false, message: "Invalid credentials" });
     }
 
-    const [sellerProfile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, userRecord.id))
-      .limit(1);
+    const sellerProfile = await SellerModel.findOne({ user: userRecord._id }).lean();
 
     const token = signAuthCookies(res, {
       id: userRecord.id,
@@ -118,13 +117,7 @@ export const sellerRegisterHandler = async (req, res) => {
 
     const normalizedDisplayName = displayName?.trim() || name;
 
-    const dbClient = getDb();
-
-    const [existingUser] = await dbClient
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const existingUser = await UserModel.findOne({ email });
 
     if (existingUser) {
       return res.status(400).json({
@@ -135,16 +128,13 @@ export const sellerRegisterHandler = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const [createdUser] = await dbClient
-      .insert(users)
-      .values({
-        name,
-        email,
-        password: hashedPassword,
-        role: "seller",
-        isActive: true,
-      })
-      .returning();
+    const createdUser = await UserModel.create({
+      name,
+      email,
+      password: hashedPassword,
+      role: "seller",
+      isActive: true,
+    });
 
     await recordTransactionLog({
       tableName: "users",
@@ -159,14 +149,11 @@ export const sellerRegisterHandler = async (req, res) => {
       },
     });
 
-    const [createdSeller] = await dbClient
-      .insert(sellers)
-      .values({
-        userId: createdUser.id,
-        displayName: normalizedDisplayName,
-        status: "pending",
-      })
-      .returning();
+    const createdSeller = await SellerModel.create({
+      user: createdUser._id,
+      displayName: normalizedDisplayName,
+      status: "pending",
+    });
 
     await recordTransactionLog({
       tableName: "sellers",
@@ -200,15 +187,15 @@ export const sellerRegisterHandler = async (req, res) => {
 
 export const isSellerAuth = async (req, res) => {
   try {
-    const [profile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, req.user))
-      .limit(1);
+    const profile = await SellerModel.findOne({ user: req.user }).lean();
 
     return res
       .status(200)
-      .json({ success: true, user: req.currentUser, sellerProfile: profile });
+      .json({
+        success: true,
+        user: req.currentUser,
+        sellerProfile: sanitizeSellerProfile(profile),
+      });
   } catch (error) {
     console.log(error.message);
     res.status(500).json({ success: false, message: error.message });
@@ -217,16 +204,12 @@ export const isSellerAuth = async (req, res) => {
 
 export const getMe = async (req, res) => {
   try {
-    const [profile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, req.user))
-      .limit(1);
+    const profile = await SellerModel.findOne({ user: req.user }).lean();
 
     return res.status(200).json({
       success: true,
       user: req.currentUser,
-      sellerProfile: profile ?? null,
+      sellerProfile: sanitizeSellerProfile(profile),
     });
   } catch (error) {
     console.log(error.message);

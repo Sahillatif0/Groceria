@@ -1,17 +1,18 @@
 import jwt from "jsonwebtoken";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { UserModel } from "../models/index.js";
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
     return null;
   }
 
-  const { password, ...rest } = userRecord;
+  const payload = userRecord.toObject ? userRecord.toObject() : userRecord;
+  const { password, ...rest } = payload;
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
   return {
     ...rest,
-    _id: userRecord.id,
+    _id: id,
+    id,
   };
 };
 
@@ -33,11 +34,7 @@ export const authAdmin = async (req, res, next) => {
         .json({ success: false, message: "Invalid token payload" });
     }
 
-    const [userRecord] = await getDb()
-      .select()
-      .from(users)
-      .where(eq(users.id, decoded.id))
-      .limit(1);
+    const userRecord = await UserModel.findById(decoded.id).lean();
 
     if (!userRecord) {
       return res
@@ -57,7 +54,7 @@ export const authAdmin = async (req, res, next) => {
         .json({ success: false, message: "Admin privileges required" });
     }
 
-    req.user = userRecord.id;
+    req.user = userRecord._id.toString();
     req.userRole = userRecord.role;
     req.currentUser = sanitizeUser(userRecord);
 

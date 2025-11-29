@@ -1,1 +1,5 @@
-export { connectDb, getDb, getPool } from "../db/client.js";
+export {
+	connectMongo as connectDb,
+	disconnectMongo as disconnectDb,
+	getMongoConnection,
+} from "../db/mongoClient.js";
