@@ -1,5 +1,4 @@
-import { getDb } from "../db/client.js";
-import { adminAuditLogs } from "../db/schema.js";
+import { query } from "../db/client.js";
 
 export const recordAdminAction = async ({
   adminId,
@@ -9,15 +8,19 @@ export const recordAdminAction = async ({
   metadata = {},
 }) => {
   try {
-    await getDb()
-      .insert(adminAuditLogs)
-      .values({
-        adminId: adminId ?? null,
-        action,
-        targetType,
-        targetId,
-        metadata,
-      });
+    await query(
+      `
+        INSERT INTO admin_audit_logs (
+          admin_id,
+          action,
+          target_type,
+          target_id,
+          metadata
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [adminId ?? null, action, targetType, targetId, metadata]
+    );
   } catch (error) {
     console.error("Failed to record admin audit log", error.message);
   }

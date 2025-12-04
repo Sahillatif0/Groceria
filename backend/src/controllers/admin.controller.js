@@ -1,19 +1,9 @@
 import bcrypt from "bcrypt";
 import crypto from "node:crypto";
-import { getDb } from "../db/client.js";
-import {
-  users,
-  sellers,
-  products,
-  orders,
-  orderItems,
-} from "../db/schema.js";
-import { desc, eq, inArray, notInArray } from "drizzle-orm";
+import { query, queryOne, queryMany } from "../db/client.js";
 import { isValidUuid } from "../utils/validators.js";
 import { recordAdminAction } from "../utils/adminAudit.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
-
-const db = () => getDb();
 
 const SELLER_STATUSES = new Set(["pending", "active", "suspended"]);
 const VALID_ORDER_STATUSES = new Set([
@@ -26,6 +16,54 @@ const VALID_ORDER_STATUSES = new Set([
   "Cancelled",
   "Cancelled by Admin",
 ]);
+
+const USER_COLUMNS = `
+  id,
+  name,
+  email,
+  role,
+  is_active,
+  created_at,
+  updated_at
+`;
+
+const SELLER_COLUMNS = `
+  id,
+  user_id,
+  display_name,
+  status,
+  deactivated_at,
+  created_at,
+  updated_at
+`;
+
+const PRODUCT_COLUMNS = `
+  id,
+  name,
+  description,
+  price,
+  offer_price,
+  image,
+  category,
+  in_stock,
+  is_archived,
+  seller_id,
+  created_at,
+  updated_at
+`;
+
+const ORDER_COLUMNS = `
+  id,
+  user_id,
+  amount,
+  address_id,
+  status,
+  payment_type,
+  is_paid,
+  cancelled_at,
+  created_at,
+  updated_at
+`;
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
@@ -41,12 +79,36 @@ const formatSellerRow = (row) => ({
   status: row.status,
   displayName: row.displayName,
   deactivatedAt: row.deactivatedAt,
-  user: sanitizeUser(row.user),
+  user: sanitizeUser({
+    id: row.userId,
+    name: row.userName,
+    email: row.userEmail,
+    role: row.userRole,
+    isActive: row.userIsActive,
+    createdAt: row.userCreatedAt,
+    updatedAt: row.userUpdatedAt,
+  }),
 });
+
+const formatProductRecord = (record) =>
+  record
+    ? {
+        ...record,
+        _id: record.id,
+      }
+    : null;
+
+const formatOrderRecord = (record) =>
+  record
+    ? {
+        ...record,
+        _id: record.id,
+      }
+    : null;
 
 export const getUsersAdminHandler = async (req, res) => {
   try {
-    const records = await db().select().from(users);
+    const records = await queryMany(`SELECT ${USER_COLUMNS} FROM users`);
 
     return res
       .status(200)
@@ -74,11 +136,15 @@ export const updateUserStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "isActive flag required" });
     }
 
-    const [userRecord] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [userId]
+    );
 
     if (!userRecord) {
       return res
@@ -98,10 +164,15 @@ export const updateUserStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "You cannot deactivate yourself" });
     }
 
-    await db()
-      .update(users)
-      .set({ isActive, updatedAt: new Date() })
-      .where(eq(users.id, userId));
+    await query(
+      `
+        UPDATE users
+        SET is_active = $1,
+            updated_at = NOW()
+        WHERE id = $2
+      `,
+      [isActive, userId]
+    );
 
     await recordTransactionLog({
       tableName: "users",
@@ -149,11 +220,15 @@ export const deleteUserAdminHandler = async (req, res) => {
       });
     }
 
-    const [userRecord] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [userId]
+    );
 
     if (!userRecord) {
       return res
@@ -179,7 +254,7 @@ export const deleteUserAdminHandler = async (req, res) => {
     };
 
     if (shouldHardDelete) {
-      await db().delete(users).where(eq(users.id, userId));
+      await query(`DELETE FROM users WHERE id = $1`, [userId]);
 
       await recordTransactionLog({
         ...baseLogPayload,
@@ -187,10 +262,21 @@ export const deleteUserAdminHandler = async (req, res) => {
         description: "User removed by admin",
       });
     } else {
-      await db()
-        .update(users)
-        .set({ isActive: false, updatedAt: new Date() })
-        .where(eq(users.id, userId));
+      if (!userRecord.isActive) {
+        return res
+          .status(400)
+          .json({ success: false, message: "User already inactive" });
+      }
+
+      await query(
+        `
+          UPDATE users
+          SET is_active = false,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [userId]
+      );
 
       await recordTransactionLog({
         ...baseLogPayload,
@@ -204,12 +290,13 @@ export const deleteUserAdminHandler = async (req, res) => {
       action: shouldHardDelete ? "user_hard_deleted" : "user_soft_deleted",
       targetType: "user",
       targetId: userId,
-      metadata: {
-        hardDelete: shouldHardDelete,
-      },
+      metadata: { hardDelete: shouldHardDelete },
     });
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({
+      success: true,
+      message: shouldHardDelete ? "User deleted" : "User deactivated",
+    });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -218,16 +305,24 @@ export const deleteUserAdminHandler = async (req, res) => {
 
 export const getSellersAdminHandler = async (req, res) => {
   try {
-    const records = await db()
-      .select({
-        sellerId: sellers.id,
-        status: sellers.status,
-        displayName: sellers.displayName,
-        deactivatedAt: sellers.deactivatedAt,
-        user: users,
-      })
-      .from(sellers)
-      .leftJoin(users, eq(sellers.userId, users.id));
+    const records = await queryMany(
+      `
+        SELECT
+          s.id AS seller_id,
+          s.status,
+          s.display_name,
+          s.deactivated_at,
+          u.id AS user_id,
+          u.name AS user_name,
+          u.email AS user_email,
+          u.role AS user_role,
+          u.is_active AS user_is_active,
+          u.created_at AS user_created_at,
+          u.updated_at AS user_updated_at
+        FROM sellers s
+        LEFT JOIN users u ON s.user_id = u.id
+      `
+    );
 
     return res
       .status(200)
@@ -257,14 +352,15 @@ export const createSellerAdminHandler = async (req, res) => {
       });
     }
 
-    const now = new Date();
-    const dbClient = db();
-
-    const [existingUser] = await dbClient
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const existingUser = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE email = $1
+        LIMIT 1
+      `,
+      [email]
+    );
 
     let userId;
     let generatedPassword = null;
@@ -277,15 +373,17 @@ export const createSellerAdminHandler = async (req, res) => {
         });
       }
 
-      await dbClient
-        .update(users)
-        .set({
-          name,
-          role: "seller",
-          isActive: true,
-          updatedAt: now,
-        })
-        .where(eq(users.id, existingUser.id));
+      await query(
+        `
+          UPDATE users
+          SET name = $1,
+              role = 'seller',
+              is_active = true,
+              updated_at = NOW()
+          WHERE id = $2
+        `,
+        [name, existingUser.id]
+      );
       userId = existingUser.id;
 
       await recordTransactionLog({
@@ -309,16 +407,14 @@ export const createSellerAdminHandler = async (req, res) => {
 
       const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
-      const [createdUser] = await dbClient
-        .insert(users)
-        .values({
-          name,
-          email,
-          password: hashedPassword,
-          role: "seller",
-          isActive: true,
-        })
-        .returning();
+      const createdUser = await queryOne(
+        `
+          INSERT INTO users (name, email, password, role, is_active)
+          VALUES ($1, $2, $3, 'seller', true)
+          RETURNING ${USER_COLUMNS}
+        `,
+        [name, email, hashedPassword]
+      );
 
       userId = createdUser.id;
 
@@ -336,12 +432,17 @@ export const createSellerAdminHandler = async (req, res) => {
       });
     }
 
-    const [existingSeller] = await dbClient
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, userId))
-      .limit(1);
+    const existingSeller = await queryOne(
+      `
+        SELECT ${SELLER_COLUMNS}
+        FROM sellers
+        WHERE user_id = $1
+        LIMIT 1
+      `,
+      [userId]
+    );
 
+    const now = new Date();
     const sellerPayload = {
       displayName,
       status,
@@ -358,21 +459,32 @@ export const createSellerAdminHandler = async (req, res) => {
       : null;
 
     if (existingSeller) {
-      await dbClient
-        .update(sellers)
-        .set(sellerPayload)
-        .where(eq(sellers.id, existingSeller.id));
+      await query(
+        `
+          UPDATE sellers
+          SET display_name = $1,
+              status = $2,
+              deactivated_at = $3,
+              updated_at = NOW()
+          WHERE id = $4
+        `,
+        [
+          sellerPayload.displayName,
+          sellerPayload.status,
+          sellerPayload.deactivatedAt,
+          existingSeller.id,
+        ]
+      );
     } else {
-      const [createdSellerRow] = await dbClient
-        .insert(sellers)
-        .values({
-          userId,
-          displayName,
-          status,
-          deactivatedAt: status === "suspended" ? now : null,
-        })
-        .returning({ id: sellers.id });
-      sellerRecordId = createdSellerRow?.id ?? sellerRecordId;
+      const createdSeller = await queryOne(
+        `
+          INSERT INTO sellers (user_id, display_name, status, deactivated_at)
+          VALUES ($1, $2, $3, $4)
+          RETURNING id
+        `,
+        [userId, sellerPayload.displayName, sellerPayload.status, sellerPayload.deactivatedAt]
+      );
+      sellerRecordId = createdSeller?.id ?? sellerRecordId;
     }
 
     await recordTransactionLog({
@@ -390,11 +502,7 @@ export const createSellerAdminHandler = async (req, res) => {
       action: existingSeller ? "seller_updated" : "seller_created",
       targetType: "seller",
       targetId: userId,
-      metadata: {
-        status,
-        displayName,
-        email,
-      },
+      metadata: { status, displayName, email },
     });
 
     const response = {
@@ -429,11 +537,15 @@ export const promoteUserToSellerHandler = async (req, res) => {
         .json({ success: false, message: "Display name is required" });
     }
 
-    const [userRecord] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [userId]
+    );
 
     if (!userRecord) {
       return res
@@ -448,10 +560,16 @@ export const promoteUserToSellerHandler = async (req, res) => {
       });
     }
 
-    await db()
-      .update(users)
-      .set({ role: "seller", isActive: true, updatedAt: new Date() })
-      .where(eq(users.id, userId));
+    await query(
+      `
+        UPDATE users
+        SET role = 'seller',
+            is_active = true,
+            updated_at = NOW()
+        WHERE id = $1
+      `,
+      [userId]
+    );
 
     await recordTransactionLog({
       tableName: "users",
@@ -463,21 +581,29 @@ export const promoteUserToSellerHandler = async (req, res) => {
       afterData: { role: "seller", isActive: true },
     });
 
-    const [createdSeller] = await db()
-      .insert(sellers)
-      .values({ userId, displayName, status: "active" })
-      .onConflictDoNothing()
-      .returning({ id: sellers.id, status: sellers.status });
+    const createdSeller = await queryOne(
+      `
+        INSERT INTO sellers (user_id, display_name, status)
+        VALUES ($1, $2, 'active')
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING id, status
+      `,
+      [userId, displayName]
+    );
 
     let sellerRecordId = createdSeller?.id ?? null;
     let sellerStatus = createdSeller?.status ?? "active";
 
     if (!sellerRecordId) {
-      const [existingSellerRecord] = await db()
-        .select({ id: sellers.id, status: sellers.status })
-        .from(sellers)
-        .where(eq(sellers.userId, userId))
-        .limit(1);
+      const existingSellerRecord = await queryOne(
+        `
+          SELECT id, status
+          FROM sellers
+          WHERE user_id = $1
+          LIMIT 1
+        `,
+        [userId]
+      );
       sellerRecordId = existingSellerRecord?.id ?? null;
       sellerStatus = existingSellerRecord?.status ?? sellerStatus;
     }
@@ -525,15 +651,15 @@ export const updateSellerStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid seller status" });
     }
 
-    const [sellerRecord] = await db()
-      .select({
-        id: sellers.id,
-        userId: sellers.userId,
-        status: sellers.status,
-      })
-      .from(sellers)
-      .where(eq(sellers.id, sellerId))
-      .limit(1);
+    const sellerRecord = await queryOne(
+      `
+        SELECT id, user_id, status
+        FROM sellers
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [sellerId]
+    );
 
     if (!sellerRecord) {
       return res
@@ -541,29 +667,35 @@ export const updateSellerStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "Seller not found" });
     }
 
-    const now = new Date();
+    await query(
+      `
+        UPDATE sellers
+        SET status = $1,
+            deactivated_at = CASE WHEN $1 = 'suspended' THEN NOW() ELSE NULL END,
+            updated_at = NOW()
+        WHERE id = $2
+      `,
+      [status, sellerId]
+    );
 
-    await db()
-      .update(sellers)
-      .set({
-        status,
-        deactivatedAt: status === "suspended" ? now : null,
-        updatedAt: now,
-      })
-      .where(eq(sellers.id, sellerId));
-
-    await db()
-      .update(users)
-      .set({
-        isActive: status !== "suspended",
-        role: status === "suspended" ? "customer" : "seller",
-        updatedAt: now,
-      })
-      .where(eq(users.id, sellerRecord.userId));
+    await query(
+      `
+        UPDATE users
+        SET is_active = $1,
+            role = $2,
+            updated_at = NOW()
+        WHERE id = $3
+      `,
+      [
+        status !== "suspended",
+        status === "suspended" ? "customer" : "seller",
+        sellerRecord.userId,
+      ]
+    );
 
     await recordTransactionLog({
       tableName: "sellers",
-      recordId: sellerRecord.id,
+      recordId: sellerId,
       operation: "ADMIN_SELLER_STATUS_UPDATED",
       actorId: req.user,
       actorRole: "admin",
@@ -571,27 +703,22 @@ export const updateSellerStatusAdminHandler = async (req, res) => {
       afterData: { status },
     });
 
-    await recordTransactionLog({
-      tableName: "users",
-      recordId: sellerRecord.userId,
-      operation: "ADMIN_SELLER_LINKED_USER_UPDATED",
-      actorId: req.user,
-      actorRole: "admin",
-      afterData: {
-        role: status === "suspended" ? "customer" : "seller",
-        isActive: status !== "suspended",
-      },
-    });
-
     await recordAdminAction({
       adminId: req.user,
-      action: "seller_status_updated",
+      action:
+        status === "suspended"
+          ? "seller_suspended"
+          : status === "active"
+          ? "seller_reinstated"
+          : "seller_status_updated",
       targetType: "seller",
-      targetId: sellerRecord.userId,
-      metadata: { from: sellerRecord.status, to: status },
+      targetId: sellerId,
+      metadata: { previous: sellerRecord.status, next: status },
     });
 
-    return res.status(200).json({ success: true });
+    return res
+      .status(200)
+      .json({ success: true, message: "Seller status updated" });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -601,7 +728,6 @@ export const updateSellerStatusAdminHandler = async (req, res) => {
 export const deleteSellerAdminHandler = async (req, res) => {
   try {
     const { sellerId } = req.params;
-    const shouldHardDelete = req.query?.hard === "true";
 
     if (!isValidUuid(sellerId)) {
       return res
@@ -609,11 +735,16 @@ export const deleteSellerAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid seller id" });
     }
 
-    const [sellerRecord] = await db()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.id, sellerId))
-      .limit(1);
+    const sellerRecord = await queryOne(
+      `
+        SELECT s.id, s.user_id, s.status, u.role AS user_role, u.is_active AS user_is_active
+        FROM sellers s
+        LEFT JOIN users u ON s.user_id = u.id
+        WHERE s.id = $1
+        LIMIT 1
+      `,
+      [sellerId]
+    );
 
     if (!sellerRecord) {
       return res
@@ -621,55 +752,51 @@ export const deleteSellerAdminHandler = async (req, res) => {
         .json({ success: false, message: "Seller not found" });
     }
 
-    if (shouldHardDelete) {
-      await db().delete(sellers).where(eq(sellers.id, sellerId));
-    } else {
-      const now = new Date();
-      await db()
-        .update(sellers)
-        .set({
-          status: "suspended",
-          deactivatedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(sellers.id, sellerId));
-    }
+    await query(
+      `
+        UPDATE sellers
+        SET status = 'suspended',
+            deactivated_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+      `,
+      [sellerId]
+    );
 
-    await db()
-      .update(users)
-      .set({ role: "customer", updatedAt: new Date(), isActive: false })
-      .where(eq(users.id, sellerRecord.userId));
+    if (sellerRecord.userId) {
+      await query(
+        `
+          UPDATE users
+          SET role = CASE WHEN role = 'seller' THEN 'customer' ELSE role END,
+              is_active = false,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [sellerRecord.userId]
+      );
+    }
 
     await recordTransactionLog({
       tableName: "sellers",
-      recordId: sellerRecord.id,
-      operation: shouldHardDelete
-        ? "ADMIN_SELLER_HARD_DELETED"
-        : "ADMIN_SELLER_SUSPENDED",
+      recordId: sellerId,
+      operation: "ADMIN_SELLER_SUSPENDED",
       actorId: req.user,
       actorRole: "admin",
       beforeData: { status: sellerRecord.status },
-      afterData: shouldHardDelete ? null : { status: "suspended" },
-    });
-
-    await recordTransactionLog({
-      tableName: "users",
-      recordId: sellerRecord.userId,
-      operation: "ADMIN_SELLER_USER_DEACTIVATED",
-      actorId: req.user,
-      actorRole: "admin",
-      afterData: { role: "customer", isActive: false },
+      afterData: { status: "suspended" },
     });
 
     await recordAdminAction({
       adminId: req.user,
-      action: shouldHardDelete ? "seller_hard_deleted" : "seller_suspended",
+      action: "seller_suspended",
       targetType: "seller",
-      targetId: sellerRecord.userId,
-      metadata: { hardDelete: shouldHardDelete },
+      targetId: sellerId,
+      metadata: { previous: sellerRecord.status, userId: sellerRecord.userId },
     });
 
-    return res.status(200).json({ success: true });
+    return res
+      .status(200)
+      .json({ success: true, message: "Seller suspended" });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -680,16 +807,18 @@ export const getProductsAdminHandler = async (req, res) => {
   try {
     const includeArchived = req.query?.includeArchived === "true";
 
-    const records = includeArchived
-      ? await db().select().from(products)
-      : await db()
-          .select()
-          .from(products)
-          .where(eq(products.isArchived, false));
+    const products = await queryMany(
+      `
+        SELECT ${PRODUCT_COLUMNS}
+        FROM products
+        ${includeArchived ? "" : "WHERE is_archived = false"}
+        ORDER BY created_at DESC
+      `
+    );
 
     return res.status(200).json({
       success: true,
-      products: records.map((product) => ({ ...product, _id: product.id })),
+      products: products.map(formatProductRecord),
     });
   } catch (error) {
     console.log(error.message);
@@ -708,11 +837,15 @@ export const deleteProductAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid product id" });
     }
 
-    const [productRecord] = await db()
-      .select()
-      .from(products)
-      .where(eq(products.id, productId))
-      .limit(1);
+    const productRecord = await queryOne(
+      `
+        SELECT ${PRODUCT_COLUMNS}
+        FROM products
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [productId]
+    );
 
     if (!productRecord) {
       return res
@@ -720,22 +853,15 @@ export const deleteProductAdminHandler = async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
+    if (!shouldHardDelete && productRecord.isArchived) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product already archived" });
+    }
+
     if (shouldHardDelete) {
-      const [linkedOrderItem] = await db()
-        .select()
-        .from(orderItems)
-        .where(eq(orderItems.productId, productId))
-        .limit(1);
-
-      if (linkedOrderItem) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "Cannot permanently delete a product with existing order history. Archive instead or remove related orders first.",
-        });
-      }
-
-      await db().delete(products).where(eq(products.id, productId));
+      await query(`DELETE FROM order_items WHERE product_id = $1`, [productId]);
+      await query(`DELETE FROM products WHERE id = $1`, [productId]);
 
       await recordTransactionLog({
         tableName: "products",
@@ -743,15 +869,22 @@ export const deleteProductAdminHandler = async (req, res) => {
         operation: "ADMIN_PRODUCT_HARD_DELETED",
         actorId: req.user,
         actorRole: "admin",
-        beforeData: { isArchived: productRecord.isArchived },
-        description: "Product removed by admin",
+        beforeData: {
+          name: productRecord.name,
+          isArchived: productRecord.isArchived,
+        },
       });
     } else {
-      const [archivedProduct] = await db()
-        .update(products)
-        .set({ isArchived: true, updatedAt: new Date() })
-        .where(eq(products.id, productId))
-        .returning({ id: products.id, isArchived: products.isArchived });
+      const archivedProduct = await queryOne(
+        `
+          UPDATE products
+          SET is_archived = true,
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING ${PRODUCT_COLUMNS}
+        `,
+        [productId]
+      );
 
       await recordTransactionLog({
         tableName: "products",
@@ -760,19 +893,22 @@ export const deleteProductAdminHandler = async (req, res) => {
         actorId: req.user,
         actorRole: "admin",
         beforeData: { isArchived: productRecord.isArchived },
-        afterData: { isArchived: archivedProduct?.isArchived ?? true },
+        afterData: { isArchived: archivedProduct.isArchived },
       });
     }
 
     await recordAdminAction({
       adminId: req.user,
-      action: shouldHardDelete ? "product_hard_deleted" : "product_archived",
+      action: shouldHardDelete ? "product_deleted" : "product_archived",
       targetType: "product",
       targetId: productId,
       metadata: { hardDelete: shouldHardDelete },
     });
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({
+      success: true,
+      message: shouldHardDelete ? "Product deleted" : "Product archived",
+    });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -783,17 +919,19 @@ export const getOrdersAdminHandler = async (req, res) => {
   try {
     const includeCancelled = req.query?.includeCancelled === "true";
 
-    const query = includeCancelled
-      ? db().select().from(orders).orderBy(desc(orders.createdAt))
-      : db()
-          .select()
-          .from(orders)
-          .where(notInArray(orders.status, ["Cancelled", "Cancelled by Admin"]))
-          .orderBy(desc(orders.createdAt));
+    const orders = await queryMany(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        ${includeCancelled ? "" : "WHERE status NOT IN ('Cancelled', 'Cancelled by Admin')"}
+        ORDER BY created_at DESC
+      `
+    );
 
-    const records = await query;
-
-    return res.status(200).json({ success: true, orders: records });
+    return res.status(200).json({
+      success: true,
+      orders: orders.map(formatOrderRecord),
+    });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -803,7 +941,7 @@ export const getOrdersAdminHandler = async (req, res) => {
 export const updateOrderStatusAdminHandler = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { status, isPaid } = req.body;
+    const { status } = req.body;
 
     if (!isValidUuid(orderId)) {
       return res
@@ -817,11 +955,15 @@ export const updateOrderStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid order status" });
     }
 
-    const [orderRecord] = await db()
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
+    const orderRecord = await queryOne(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [orderId]
+    );
 
     if (!orderRecord) {
       return res
@@ -829,24 +971,23 @@ export const updateOrderStatusAdminHandler = async (req, res) => {
         .json({ success: false, message: "Order not found" });
     }
 
-    const now = new Date();
-    const payload = {
-      status,
-      updatedAt: now,
-    };
-
-    if (typeof isPaid === "boolean") {
-      payload.isPaid = isPaid;
+    if (orderRecord.status === status) {
+      return res.status(200).json({ success: true, message: "No changes" });
     }
 
-    payload.cancelledAt = status.toLowerCase().includes("cancel")
-      ? now
-      : null;
-
-    await db()
-      .update(orders)
-      .set(payload)
-      .where(eq(orders.id, orderId));
+    await query(
+      `
+        UPDATE orders
+        SET status = $1,
+            cancelled_at = CASE
+              WHEN $1 IN ('Cancelled', 'Cancelled by Admin') THEN NOW()
+              ELSE NULL
+            END,
+            updated_at = NOW()
+        WHERE id = $2
+      `,
+      [status, orderId]
+    );
 
     await recordTransactionLog({
       tableName: "orders",
@@ -854,14 +995,8 @@ export const updateOrderStatusAdminHandler = async (req, res) => {
       operation: "ADMIN_ORDER_STATUS_UPDATED",
       actorId: req.user,
       actorRole: "admin",
-      beforeData: {
-        status: orderRecord.status,
-        isPaid: orderRecord.isPaid,
-      },
-      afterData: {
-        status,
-        isPaid: payload.isPaid ?? orderRecord.isPaid,
-      },
+      beforeData: { status: orderRecord.status },
+      afterData: { status },
     });
 
     await recordAdminAction({
@@ -869,14 +1004,12 @@ export const updateOrderStatusAdminHandler = async (req, res) => {
       action: "order_status_updated",
       targetType: "order",
       targetId: orderId,
-      metadata: {
-        from: orderRecord.status,
-        to: status,
-        paid: payload.isPaid ?? orderRecord.isPaid,
-      },
+      metadata: { previous: orderRecord.status, next: status },
     });
 
-    return res.status(200).json({ success: true });
+    return res
+      .status(200)
+      .json({ success: true, message: "Order status updated" });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -894,27 +1027,25 @@ export const deleteOrderAdminHandler = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const now = new Date();
+    const orderRecord = await queryOne(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [orderId]
+    );
 
-    const [orderRecord] = await db()
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
+    if (!orderRecord) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
 
     if (shouldHardDelete) {
-      const relatedItems = await db()
-        .select({ id: orderItems.id })
-        .from(orderItems)
-        .where(eq(orderItems.orderId, orderId));
-
-      if (relatedItems.length) {
-        await db()
-          .delete(orderItems)
-          .where(inArray(orderItems.id, relatedItems.map((item) => item.id)));
-      }
-
-      await db().delete(orders).where(eq(orders.id, orderId));
+      await query(`DELETE FROM order_items WHERE order_id = $1`, [orderId]);
+      await query(`DELETE FROM orders WHERE id = $1`, [orderId]);
 
       await recordTransactionLog({
         tableName: "orders",
@@ -922,21 +1053,29 @@ export const deleteOrderAdminHandler = async (req, res) => {
         operation: "ADMIN_ORDER_HARD_DELETED",
         actorId: req.user,
         actorRole: "admin",
-        beforeData: orderRecord
-          ? { status: orderRecord.status }
-          : null,
-        description: "Order removed by admin",
+        beforeData: { status: orderRecord.status },
       });
     } else {
-      const [cancelledOrder] = await db()
-        .update(orders)
-        .set({
-          status: "Cancelled by Admin",
-          cancelledAt: now,
-          updatedAt: now,
-        })
-        .where(eq(orders.id, orderId))
-        .returning({ status: orders.status });
+      if (
+        orderRecord.status === "Cancelled" ||
+        orderRecord.status === "Cancelled by Admin"
+      ) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Order already cancelled" });
+      }
+
+      await query(
+        `
+          UPDATE orders
+          SET status = 'Cancelled by Admin',
+              cancelled_at = NOW(),
+              is_paid = false,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [orderId]
+      );
 
       await recordTransactionLog({
         tableName: "orders",
@@ -944,22 +1083,23 @@ export const deleteOrderAdminHandler = async (req, res) => {
         operation: "ADMIN_ORDER_CANCELLED",
         actorId: req.user,
         actorRole: "admin",
-        beforeData: orderRecord
-          ? { status: orderRecord.status }
-          : null,
-        afterData: { status: cancelledOrder?.status ?? "Cancelled by Admin" },
+        beforeData: { status: orderRecord.status },
+        afterData: { status: "Cancelled by Admin" },
       });
     }
 
     await recordAdminAction({
       adminId: req.user,
-      action: shouldHardDelete ? "order_hard_deleted" : "order_cancelled",
+      action: shouldHardDelete ? "order_deleted" : "order_cancelled",
       targetType: "order",
       targetId: orderId,
       metadata: { hardDelete: shouldHardDelete },
     });
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({
+      success: true,
+      message: shouldHardDelete ? "Order deleted" : "Order cancelled",
+    });
   } catch (error) {
     console.log(error.message);
     return res.status(500).json({ success: false, message: error.message });

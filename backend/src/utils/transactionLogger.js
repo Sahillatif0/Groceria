@@ -1,5 +1,4 @@
-import { getDb } from "../db/client.js";
-import { transactionLogs } from "../db/schema.js";
+import { query } from "../db/client.js";
 
 const buildMetadata = ({ actorId, actorRole, description, payload }) => {
   const meta = {};
@@ -34,15 +33,25 @@ export const recordTransactionLog = async ({
       payload,
     });
 
-    await getDb()
-      .insert(transactionLogs)
-      .values({
+    await query(
+      `
+        INSERT INTO transaction_logs (
+          table_name,
+          record_id,
+          operation,
+          before_data,
+          after_data
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [
         tableName,
         recordId,
         operation,
-        beforeData: beforeData ?? null,
-        afterData: afterData ?? metadata,
-      });
+        beforeData ?? null,
+        afterData ?? metadata,
+      ]
+    );
   } catch (error) {
     console.error("Failed to record transaction log", error.message);
   }

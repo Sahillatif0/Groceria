@@ -1,6 +1,4 @@
-import { eq } from "drizzle-orm";
-import { getDb } from "../db/client.js";
-import { chatConversations } from "../db/schema.js";
+import { queryOne } from "../db/client.js";
 import { isValidUuid } from "../utils/validators.js";
 
 let ioInstance = null;
@@ -20,15 +18,15 @@ export const userRoom = (userId) => `user:${userId}`;
 export const conversationRoom = (conversationId) => `conversation:${conversationId}`;
 
 const ensureConversationAccess = async ({ conversationId, userId }) => {
-  const [conversation] = await getDb()
-    .select({
-      id: chatConversations.id,
-      userId: chatConversations.userId,
-      sellerId: chatConversations.sellerId,
-    })
-    .from(chatConversations)
-    .where(eq(chatConversations.id, conversationId))
-    .limit(1);
+  const conversation = await queryOne(
+    `
+      SELECT id, user_id, seller_id
+      FROM chat_conversations
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [conversationId]
+  );
 
   if (!conversation) {
     throw new Error("Conversation not found");

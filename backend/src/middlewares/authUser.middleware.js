@@ -1,7 +1,5 @@
 import jwt from "jsonwebtoken";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { queryOne } from "../db/client.js";
 
 export const authUser = async (req, res, next) => {
   const { token } = req.cookies;
@@ -20,15 +18,15 @@ export const authUser = async (req, res, next) => {
         .json({ success: false, message: "Invalid token payload" });
     }
 
-    const [userRecord] = await getDb()
-      .select({
-        id: users.id,
-        role: users.role,
-        isActive: users.isActive,
-      })
-      .from(users)
-      .where(eq(users.id, decodedToken.id))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [decodedToken.id]
+    );
 
     if (!userRecord) {
       return res

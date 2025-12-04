@@ -1,8 +1,6 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
-import { getDb } from "../db/client.js";
-import { users, sellers } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { queryOne, withTransaction } from "../db/client.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
 const sanitizeUser = (userRecord) => {
@@ -55,11 +53,15 @@ export const sellerLoginHandler = async (req, res) => {
         .json({ success: false, message: "Email and password required" });
     }
 
-    const [userRecord] = await getDb()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, name, email, password, role, is_active
+        FROM users
+        WHERE email = $1
+        LIMIT 1
+      `,
+      [email]
+    );
 
     if (!userRecord || !["seller", "admin"].includes(userRecord.role)) {
       return res
@@ -81,11 +83,15 @@ export const sellerLoginHandler = async (req, res) => {
         .json({ success: false, message: "Invalid credentials" });
     }
 
-    const [sellerProfile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, userRecord.id))
-      .limit(1);
+    const sellerProfile = await queryOne(
+      `
+        SELECT id, user_id, display_name, status, deactivated_at
+        FROM sellers
+        WHERE user_id = $1
+        LIMIT 1
+      `,
+      [userRecord.id]
+    );
 
     const token = signAuthCookies(res, {
       id: userRecord.id,
@@ -118,13 +124,10 @@ export const sellerRegisterHandler = async (req, res) => {
 
     const normalizedDisplayName = displayName?.trim() || name;
 
-    const dbClient = getDb();
-
-    const [existingUser] = await dbClient
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const existingUser = await queryOne(
+      `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
 
     if (existingUser) {
       return res.status(400).json({
@@ -135,16 +138,29 @@ export const sellerRegisterHandler = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const [createdUser] = await dbClient
-      .insert(users)
-      .values({
-        name,
-        email,
-        password: hashedPassword,
-        role: "seller",
-        isActive: true,
-      })
-      .returning();
+    const { createdUser, createdSeller } = await withTransaction(
+      async ({ queryOne: txQueryOne }) => {
+        const user = await txQueryOne(
+          `
+            INSERT INTO users (name, email, password, role, is_active)
+            VALUES ($1, $2, $3, 'seller', true)
+            RETURNING id, name, email, role, is_active
+          `,
+          [name, email, hashedPassword]
+        );
+
+        const seller = await txQueryOne(
+          `
+            INSERT INTO sellers (user_id, display_name, status)
+            VALUES ($1, $2, 'pending')
+            RETURNING id, user_id, display_name, status
+          `,
+          [user.id, normalizedDisplayName]
+        );
+
+        return { createdUser: user, createdSeller: seller };
+      }
+    );
 
     await recordTransactionLog({
       tableName: "users",
@@ -158,15 +174,6 @@ export const sellerRegisterHandler = async (req, res) => {
         role: createdUser.role,
       },
     });
-
-    const [createdSeller] = await dbClient
-      .insert(sellers)
-      .values({
-        userId: createdUser.id,
-        displayName: normalizedDisplayName,
-        status: "pending",
-      })
-      .returning();
 
     await recordTransactionLog({
       tableName: "sellers",
@@ -200,11 +207,15 @@ export const sellerRegisterHandler = async (req, res) => {
 
 export const isSellerAuth = async (req, res) => {
   try {
-    const [profile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, req.user))
-      .limit(1);
+    const profile = await queryOne(
+      `
+        SELECT id, user_id, display_name, status, created_at, updated_at
+        FROM sellers
+        WHERE user_id = $1
+        LIMIT 1
+      `,
+      [req.user]
+    );
 
     return res
       .status(200)
@@ -217,11 +228,15 @@ export const isSellerAuth = async (req, res) => {
 
 export const getMe = async (req, res) => {
   try {
-    const [profile] = await getDb()
-      .select()
-      .from(sellers)
-      .where(eq(sellers.userId, req.user))
-      .limit(1);
+    const profile = await queryOne(
+      `
+        SELECT id, user_id, display_name, status, created_at, updated_at
+        FROM sellers
+        WHERE user_id = $1
+        LIMIT 1
+      `,
+      [req.user]
+    );
 
     return res.status(200).json({
       success: true,

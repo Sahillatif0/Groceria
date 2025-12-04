@@ -1,70 +1,138 @@
 import stripe from "stripe";
-import { getDb } from "../db/client.js";
-import {
-  orders,
-  orderItems,
-  products,
-  addresses,
-  users,
-} from "../db/schema.js";
-import { eq, inArray, and, or, desc } from "drizzle-orm";
+import { query, queryOne, queryMany } from "../db/client.js";
 import { isValidUuid } from "../utils/validators.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
 
-const db = () => getDb();
+const ORDER_COLUMNS = `
+  id,
+  user_id,
+  amount,
+  address_id,
+  status,
+  payment_type,
+  is_paid,
+  cancelled_at,
+  created_at,
+  updated_at
+`;
 
-const buildProductsMap = async (productIds) => {
+const ORDER_ITEM_COLUMNS = `
+  id,
+  order_id,
+  product_id,
+  quantity,
+  created_at
+`;
+
+const PRODUCT_COLUMNS = `
+  id,
+  name,
+  description,
+  price,
+  offer_price,
+  image,
+  category,
+  in_stock,
+  is_archived,
+  seller_id
+`;
+
+const ADDRESS_COLUMNS = `
+  id,
+  user_id,
+  first_name,
+  last_name,
+  email,
+  street,
+  city,
+  state,
+  zipcode,
+  country,
+  phone,
+  created_at,
+  updated_at
+`;
+
+const formatAddress = (record) =>
+  record
+    ? {
+        ...record,
+        _id: record.id,
+      }
+    : null;
+
+const formatProduct = (record) =>
+  record
+    ? {
+        ...record,
+        _id: record.id,
+      }
+    : null;
+
+const buildProductsMap = async (productIds = []) => {
   if (!productIds.length) {
     return new Map();
   }
 
-  const rows = await db()
-    .select()
-    .from(products)
-    .where(and(inArray(products.id, productIds), eq(products.isArchived, false)));
-
-  return new Map(
-    rows.map((item) => [item.id, { ...item, _id: item.id }])
+  const rows = await queryMany(
+    `
+      SELECT ${PRODUCT_COLUMNS}
+      FROM products
+      WHERE id = ANY($1::uuid[])
+        AND is_archived = false
+    `,
+    [productIds]
   );
+
+  return new Map(rows.map((item) => [item.id, formatProduct(item)]));
 };
 
-const attachOrderRelations = async (ordersList) => {
+const attachOrderRelations = async (ordersList = []) => {
   if (!ordersList.length) {
     return [];
   }
 
   const orderIds = ordersList.map((order) => order.id);
 
-  const itemsRows = await db()
-    .select()
-    .from(orderItems)
-    .where(inArray(orderItems.orderId, orderIds));
-
-  const addressesRows = await db()
-    .select()
-    .from(addresses)
-    .where(
-      inArray(
-        addresses.id,
-        Array.from(new Set(ordersList.map((order) => order.addressId)))
-      )
-    );
-
-  const productIds = Array.from(
-    new Set(itemsRows.map((item) => item.productId))
+  const itemsRows = await queryMany(
+    `
+      SELECT ${ORDER_ITEM_COLUMNS}
+      FROM order_items
+      WHERE order_id = ANY($1::uuid[])
+    `,
+    [orderIds]
   );
 
-  const productsRows = productIds.length
-    ? await db()
-        .select()
-        .from(products)
-        .where(inArray(products.id, productIds))
+  const addressIds = Array.from(
+    new Set(ordersList.map((order) => order.addressId).filter(Boolean))
+  );
+  const addressesRows = addressIds.length
+    ? await queryMany(
+        `
+          SELECT ${ADDRESS_COLUMNS}
+          FROM addresses
+          WHERE id = ANY($1::uuid[])
+        `,
+        [addressIds]
+      )
     : [];
 
-  const addressMap = new Map(addressesRows.map((addr) => [addr.id, addr]));
-  const productMap = new Map(
-    productsRows.map((prod) => [prod.id, { ...prod, _id: prod.id }])
+  const productIds = Array.from(
+    new Set(itemsRows.map((item) => item.productId).filter(Boolean))
   );
+  const productsRows = productIds.length
+    ? await queryMany(
+        `
+          SELECT ${PRODUCT_COLUMNS}
+          FROM products
+          WHERE id = ANY($1::uuid[])
+        `,
+        [productIds]
+      )
+    : [];
+
+  const addressMap = new Map(addressesRows.map((addr) => [addr.id, formatAddress(addr)]));
+  const productMap = new Map(productsRows.map((prod) => [prod.id, formatProduct(prod)]));
   const itemsByOrder = new Map();
 
   itemsRows.forEach((item) => {
@@ -72,24 +140,40 @@ const attachOrderRelations = async (ordersList) => {
     list.push({
       ...item,
       product: productMap.get(item.productId) ?? null,
+      _id: item.id,
     });
     itemsByOrder.set(item.orderId, list);
   });
 
   return ordersList.map((order) => ({
     ...order,
-    address: addressMap.get(order.addressId)
-      ? {
-          ...addressMap.get(order.addressId),
-          _id: addressMap.get(order.addressId).id,
-        }
-      : null,
-    items: (itemsByOrder.get(order.id) ?? []).map((item) => ({
-      ...item,
-      _id: item.id,
-    })),
+    address: addressMap.get(order.addressId) ?? null,
+    items: itemsByOrder.get(order.id) ?? [],
     _id: order.id,
   }));
+};
+
+const insertOrderItems = async (orderId, items = []) => {
+  if (!items.length) {
+    return;
+  }
+
+  const values = [];
+  const placeholders = items
+    .map((item, index) => {
+      const baseIndex = index * 3;
+      values.push(orderId, item.product, item.quantity);
+      return `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3})`;
+    })
+    .join(", ");
+
+  await query(
+    `
+      INSERT INTO order_items (order_id, product_id, quantity)
+      VALUES ${placeholders}
+    `,
+    values
+  );
 };
 
 export const placeOrderHandler = async (req, res) => {
@@ -110,13 +194,15 @@ export const placeOrderHandler = async (req, res) => {
         .json({ success: false, message: "One or more products not found" });
     }
 
-    const [shippingAddress] = await db()
-      .select()
-      .from(addresses)
-      .where(
-        and(eq(addresses.id, address), eq(addresses.userId, userId))
-      )
-      .limit(1);
+    const shippingAddress = await queryOne(
+      `
+        SELECT ${ADDRESS_COLUMNS}
+        FROM addresses
+        WHERE id = $1 AND user_id = $2
+        LIMIT 1
+      `,
+      [address, userId]
+    );
 
     if (!shippingAddress) {
       return res
@@ -131,23 +217,16 @@ export const placeOrderHandler = async (req, res) => {
 
     const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    const [newOrder] = await db()
-      .insert(orders)
-      .values({
-        userId,
-        amount,
-        addressId: shippingAddress.id,
-        paymentType: "COD",
-      })
-      .returning({ id: orders.id });
-
-    await db().insert(orderItems).values(
-      items.map((item) => ({
-        orderId: newOrder.id,
-        productId: item.product,
-        quantity: item.quantity,
-      }))
+    const newOrder = await queryOne(
+      `
+        INSERT INTO orders (user_id, amount, address_id, payment_type)
+        VALUES ($1, $2, $3, 'COD')
+        RETURNING ${ORDER_COLUMNS}
+      `,
+      [userId, amount, shippingAddress.id]
     );
+
+    await insertOrderItems(newOrder.id, items);
 
     await recordTransactionLog({
       tableName: "orders",
@@ -189,13 +268,15 @@ export const placeOrderStripeHandler = async (req, res) => {
         .json({ success: false, message: "One or more products not found" });
     }
 
-    const [shippingAddress] = await db()
-      .select()
-      .from(addresses)
-      .where(
-        and(eq(addresses.id, address), eq(addresses.userId, userId))
-      )
-      .limit(1);
+    const shippingAddress = await queryOne(
+      `
+        SELECT ${ADDRESS_COLUMNS}
+        FROM addresses
+        WHERE id = $1 AND user_id = $2
+        LIMIT 1
+      `,
+      [address, userId]
+    );
 
     if (!shippingAddress) {
       return res
@@ -218,23 +299,16 @@ export const placeOrderStripeHandler = async (req, res) => {
 
     const amount = baseAmount + Math.floor(baseAmount * 0.02);
 
-    const [order] = await db()
-      .insert(orders)
-      .values({
-        userId,
-        amount,
-        addressId: shippingAddress.id,
-        paymentType: "Online",
-      })
-      .returning({ id: orders.id });
-
-    await db().insert(orderItems).values(
-      items.map((item) => ({
-        orderId: order.id,
-        productId: item.product,
-        quantity: item.quantity,
-      }))
+    const order = await queryOne(
+      `
+        INSERT INTO orders (user_id, amount, address_id, payment_type)
+        VALUES ($1, $2, $3, 'Online')
+        RETURNING ${ORDER_COLUMNS}
+      `,
+      [userId, amount, shippingAddress.id]
     );
+
+    await insertOrderItems(order.id, items);
 
     await recordTransactionLog({
       tableName: "orders",
@@ -311,14 +385,24 @@ export const stripeWebhook = async (req, res) => {
         const { orderId, userId } = session.data[0].metadata;
 
         await Promise.all([
-          db()
-            .update(orders)
-            .set({ isPaid: true, updatedAt: new Date() })
-            .where(eq(orders.id, orderId)),
-          db()
-            .update(users)
-            .set({ cartItems: {}, updatedAt: new Date() })
-            .where(eq(users.id, userId)),
+          query(
+            `
+              UPDATE orders
+              SET is_paid = true,
+                  updated_at = NOW()
+              WHERE id = $1
+            `,
+            [orderId]
+          ),
+          query(
+            `
+              UPDATE users
+              SET cart_items = '{}'::jsonb,
+                  updated_at = NOW()
+              WHERE id = $1
+            `,
+            [userId]
+          ),
         ]);
 
         await recordTransactionLog({
@@ -354,16 +438,16 @@ export const stripeWebhook = async (req, res) => {
 export const getUserOrdersHandler = async (req, res) => {
   try {
     const userId = req.user;
-    const orderList = await db()
-      .select()
-      .from(orders)
-      .where(
-        and(
-          eq(orders.userId, userId),
-          or(eq(orders.paymentType, "COD"), eq(orders.isPaid, true))
-        )
-      )
-      .orderBy(desc(orders.createdAt));
+    const orderList = await queryMany(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        WHERE user_id = $1
+          AND (payment_type = 'COD' OR is_paid = true)
+        ORDER BY created_at DESC
+      `,
+      [userId]
+    );
 
     const hydratedOrders = await attachOrderRelations(orderList);
 
@@ -379,26 +463,31 @@ export const getSellerOrdersHandler = async (req, res) => {
   try {
     const sellerId = req.user;
 
-    const itemRows = await db()
-      .select({
-        orderId: orderItems.orderId,
-        productSellerId: products.sellerId,
-      })
-      .from(orderItems)
-      .innerJoin(products, eq(orderItems.productId, products.id))
-      .where(eq(products.sellerId, sellerId));
+    const itemRows = await queryMany(
+      `
+        SELECT DISTINCT oi.order_id AS order_id
+        FROM order_items oi
+        INNER JOIN products p ON oi.product_id = p.id
+        WHERE p.seller_id = $1
+      `,
+      [sellerId]
+    );
 
-    const orderIds = Array.from(new Set(itemRows.map((row) => row.orderId)));
+    const orderIds = itemRows.map((row) => row.orderId);
 
     if (!orderIds.length) {
       return res.status(200).json({ success: true, orders: [] });
     }
 
-    const orderList = await db()
-      .select()
-      .from(orders)
-      .where(inArray(orders.id, orderIds))
-      .orderBy(desc(orders.createdAt));
+    const orderList = await queryMany(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        WHERE id = ANY($1::uuid[])
+        ORDER BY created_at DESC
+      `,
+      [orderIds]
+    );
 
     const hydratedOrders = await attachOrderRelations(orderList);
 
@@ -426,11 +515,15 @@ export const cancelUserOrderHandler = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const [orderRecord] = await db()
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
+    const orderRecord = await queryOne(
+      `
+        SELECT ${ORDER_COLUMNS}
+        FROM orders
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [orderId]
+    );
 
     if (!orderRecord || orderRecord.userId !== userId) {
       return res
@@ -467,10 +560,16 @@ export const cancelUserOrderHandler = async (req, res) => {
       });
     }
 
-    await db()
-      .update(orders)
-      .set({ status: "Cancelled", cancelledAt: new Date(), updatedAt: new Date() })
-      .where(eq(orders.id, orderId));
+    await query(
+      `
+        UPDATE orders
+        SET status = 'Cancelled',
+            cancelled_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+      `,
+      [orderId]
+    );
 
     await recordTransactionLog({
       tableName: "orders",

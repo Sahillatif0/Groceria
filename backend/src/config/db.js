@@ -1,1 +1,8 @@
-export { connectDb, getDb, getPool } from "../db/client.js";
+export {
+	connectDb,
+	getPool,
+	query,
+	queryOne,
+	queryMany,
+	withTransaction,
+} from "../db/client.js";

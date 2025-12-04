@@ -1,10 +1,8 @@
 import http from "node:http";
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
-import { eq } from "drizzle-orm";
 import { isOriginAllowed } from "../config/corsConfig.js";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
+import { queryOne } from "../db/client.js";
 import { attachChatServer, registerChatHandlers, userRoom } from "./chat.events.js";
 
 let ioInstance = null;
@@ -40,11 +38,15 @@ const authenticateSocket = async (socket, next) => {
       return next(new Error("Invalid token payload"));
     }
 
-    const [userRecord] = await getDb()
-      .select({ id: users.id, role: users.role, isActive: users.isActive })
-      .from(users)
-      .where(eq(users.id, decoded.id))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [decoded.id]
+    );
 
     if (!userRecord) {
       return next(new Error("Account not found"));

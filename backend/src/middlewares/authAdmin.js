@@ -1,7 +1,5 @@
 import jwt from "jsonwebtoken";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { queryOne } from "../db/client.js";
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
@@ -33,11 +31,15 @@ export const authAdmin = async (req, res, next) => {
         .json({ success: false, message: "Invalid token payload" });
     }
 
-    const [userRecord] = await getDb()
-      .select()
-      .from(users)
-      .where(eq(users.id, decoded.id))
-      .limit(1);
+    const userRecord = await queryOne(
+      `
+        SELECT id, name, email, role, is_active
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [decoded.id]
+    );
 
     if (!userRecord) {
       return res

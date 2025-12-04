@@ -1,17 +1,18 @@
-import { eq } from "drizzle-orm";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
+import { query } from "../db/client.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
-
-const db = () => getDb();
 
 export const updateCartHandler = async (req, res) => {
   try {
     const { userId, cartItems } = req.body;
-    await db()
-      .update(users)
-      .set({ cartItems, updatedAt: new Date() })
-      .where(eq(users.id, userId));
+    await query(
+      `
+        UPDATE users
+        SET cart_items = $1,
+            updated_at = NOW()
+        WHERE id = $2
+      `,
+      [cartItems ?? {}, userId]
+    );
 
     await recordTransactionLog({
       tableName: "users",

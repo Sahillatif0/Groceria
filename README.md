@@ -4,7 +4,7 @@ The project now ships with a staged roadmap that covers the full migration from 
 
 ## Phase 1 – Role Model & Auth
 
-- Postgres/Drizzle schema introduces user roles (`customer`, `seller`, `admin`) plus dedicated seller metadata.
+- PostgreSQL schema introduces user roles (`customer`, `seller`, `admin`) plus dedicated seller metadata.
 - JWT middleware verifies role + active status for every request.
 - Admin seeding script (`npm run db:seed-admin`) provisions the first admin via `ADMIN_NAME`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD` environment variables.
 
@@ -24,7 +24,7 @@ The project now ships with a staged roadmap that covers the full migration from 
 
 - Database migration `002_admin_controls.sql` deploys new columns (`is_active`, `is_archived`, `cancelled_at`, etc.).
 - Seller/product seed flows normalize description fields and enforce numeric pricing validation.
-- Admin seeding + Drizzle migrations keep environments reproducible (`npm run db:push`).
+- Admin seeding + SQL migrations keep environments reproducible.
 
 ## Phase 5 – Testing & Rollout
 

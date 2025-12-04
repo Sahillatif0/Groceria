@@ -1,15 +1,44 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
-import { getDb } from "../db/client.js";
-import {
-  chatConversations,
-  chatMessages,
-  products,
-  users,
-} from "../db/schema.js";
+import { query, queryMany, queryOne } from "../db/client.js";
 import { isValidUuid } from "../utils/validators.js";
 import { emitChatMessage } from "../socket/chat.events.js";
 
-const db = () => getDb();
+const USER_COLUMNS = `
+  id,
+  name,
+  email,
+  role,
+  is_active,
+  created_at,
+  updated_at
+`;
+
+const PRODUCT_COLUMNS = `
+  id,
+  name,
+  offer_price,
+  image,
+  seller_id
+`;
+
+const CONVERSATION_COLUMNS = `
+  id,
+  user_id,
+  seller_id,
+  product_id,
+  created_at,
+  updated_at
+`;
+
+const MESSAGE_COLUMNS = `
+  id,
+  conversation_id,
+  sender_id,
+  sender_role,
+  body,
+  read_by_user,
+  read_by_seller,
+  created_at
+`;
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
@@ -74,46 +103,62 @@ const formatConversation = (conversationRecord, extras = {}) => {
   return payload;
 };
 
-const getLastMessage = async (conversationId) => {
-  const [latest] = await db()
-    .select()
-    .from(chatMessages)
-    .where(eq(chatMessages.conversationId, conversationId))
-    .orderBy(desc(chatMessages.createdAt))
-    .limit(1);
-
-  return latest ?? null;
-};
+const getLastMessage = (conversationId) =>
+  queryOne(
+    `
+      SELECT ${MESSAGE_COLUMNS}
+      FROM chat_messages
+      WHERE conversation_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [conversationId]
+  );
 
 const loadConversationWithMeta = async (conversationId) => {
-  const [conversation] = await db()
-    .select()
-    .from(chatConversations)
-    .where(eq(chatConversations.id, conversationId))
-    .limit(1);
+  const conversation = await queryOne(
+    `
+      SELECT ${CONVERSATION_COLUMNS}
+      FROM chat_conversations
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [conversationId]
+  );
 
   if (!conversation) {
     return null;
   }
 
-  const [[customer], [seller], productRecord, lastMessage] = await Promise.all([
-    db()
-      .select()
-      .from(users)
-      .where(eq(users.id, conversation.userId))
-      .limit(1),
-    db()
-      .select()
-      .from(users)
-      .where(eq(users.id, conversation.sellerId))
-      .limit(1),
+  const [customer, seller, productRecord, lastMessage] = await Promise.all([
+    queryOne(
+      `
+        SELECT ${USER_COLUMNS}
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [conversation.userId]
+    ),
+    queryOne(
+      `
+        SELECT ${USER_COLUMNS}
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [conversation.sellerId]
+    ),
     conversation.productId
-      ? db()
-          .select()
-          .from(products)
-          .where(eq(products.id, conversation.productId))
-          .limit(1)
-          .then((records) => records[0] ?? null)
+      ? queryOne(
+          `
+            SELECT ${PRODUCT_COLUMNS}
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [conversation.productId]
+        )
       : Promise.resolve(null),
     getLastMessage(conversationId),
   ]);
@@ -126,26 +171,32 @@ const loadConversationWithMeta = async (conversationId) => {
   });
 };
 
-const findExistingConversation = async ({
-  userId,
-  sellerId,
-  productId,
-}) => {
-  const filters = [eq(chatConversations.userId, userId), eq(chatConversations.sellerId, sellerId)];
-
+const findExistingConversation = ({ userId, sellerId, productId }) => {
   if (productId) {
-    filters.push(eq(chatConversations.productId, productId));
-  } else {
-    filters.push(isNull(chatConversations.productId));
+    return queryOne(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE user_id = $1
+          AND seller_id = $2
+          AND product_id = $3
+        LIMIT 1
+      `,
+      [userId, sellerId, productId]
+    );
   }
 
-  const [conversation] = await db()
-    .select()
-    .from(chatConversations)
-    .where(and(...filters))
-    .limit(1);
-
-  return conversation ?? null;
+  return queryOne(
+    `
+      SELECT ${CONVERSATION_COLUMNS}
+      FROM chat_conversations
+      WHERE user_id = $1
+        AND seller_id = $2
+        AND product_id IS NULL
+      LIMIT 1
+    `,
+    [userId, sellerId]
+  );
 };
 
 const resolveSellerAndProduct = async ({ sellerId, productId }) => {
@@ -157,11 +208,15 @@ const resolveSellerAndProduct = async ({ sellerId, productId }) => {
       throw new Error("Invalid product id");
     }
 
-    const [productRecord] = await db()
-      .select()
-      .from(products)
-      .where(eq(products.id, resolvedProductId))
-      .limit(1);
+    const productRecord = await queryOne(
+      `
+        SELECT ${PRODUCT_COLUMNS}
+        FROM products
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [resolvedProductId]
+    );
 
     if (!productRecord) {
       throw new Error("Product not found");
@@ -183,11 +238,15 @@ const resolveSellerAndProduct = async ({ sellerId, productId }) => {
     throw new Error("Invalid seller id");
   }
 
-  const [sellerRecord] = await db()
-    .select()
-    .from(users)
-    .where(eq(users.id, resolvedSellerId))
-    .limit(1);
+  const sellerRecord = await queryOne(
+    `
+      SELECT ${USER_COLUMNS}
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [resolvedSellerId]
+  );
 
   if (!sellerRecord || !["seller", "admin"].includes(sellerRecord.role)) {
     throw new Error("Seller account not found");
@@ -209,7 +268,7 @@ const ensureConversation = async ({ userId, sellerId, productId }) => {
     throw new Error("Cannot create a conversation with yourself");
   }
 
-  let conversation = await findExistingConversation({
+  const conversation = await findExistingConversation({
     userId,
     sellerId,
     productId,
@@ -219,52 +278,89 @@ const ensureConversation = async ({ userId, sellerId, productId }) => {
     return conversation;
   }
 
-  const [created] = await db()
-    .insert(chatConversations)
-    .values({
-      userId,
-      sellerId,
-      productId: productId ?? null,
-    })
-    .returning();
-
-  return created;
+  return queryOne(
+    `
+      INSERT INTO chat_conversations (user_id, seller_id, product_id)
+      VALUES ($1, $2, $3)
+      RETURNING ${CONVERSATION_COLUMNS}
+    `,
+    [userId, sellerId, productId ?? null]
+  );
 };
 
-const updateConversationTimestamp = async (conversationId) => {
-  await db()
-    .update(chatConversations)
-    .set({ updatedAt: new Date() })
-    .where(eq(chatConversations.id, conversationId));
+const updateConversationTimestamp = (conversationId) =>
+  query(
+    `
+      UPDATE chat_conversations
+      SET updated_at = NOW()
+      WHERE id = $1
+    `,
+    [conversationId]
+  );
+
+const fetchUsersByIds = (ids = []) => {
+  if (!ids.length) {
+    return Promise.resolve([]);
+  }
+
+  return queryMany(
+    `
+      SELECT ${USER_COLUMNS}
+      FROM users
+      WHERE id = ANY($1::uuid[])
+    `,
+    [ids]
+  );
+};
+
+const fetchProductsByIds = (ids = []) => {
+  if (!ids.length) {
+    return Promise.resolve([]);
+  }
+
+  return queryMany(
+    `
+      SELECT ${PRODUCT_COLUMNS}
+      FROM products
+      WHERE id = ANY($1::uuid[])
+    `,
+    [ids]
+  );
 };
 
 export const listUserConversations = async (req, res) => {
   try {
-    const conversations = await db()
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.userId, req.user))
-      .orderBy(desc(chatConversations.updatedAt));
+    const conversations = await queryMany(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE user_id = $1
+        ORDER BY updated_at DESC
+      `,
+      [req.user]
+    );
 
     if (!conversations.length) {
       return res.json({ success: true, conversations: [] });
     }
 
-    const sellerIds = [...new Set(conversations.map((item) => item.sellerId))];
-    const productIds = [...new Set(conversations.map((item) => item.productId).filter(Boolean))];
+    const sellerIds = Array.from(new Set(conversations.map((item) => item.sellerId)));
+    const productIds = Array.from(
+      new Set(conversations.map((item) => item.productId).filter(Boolean))
+    );
 
-    const [[customerRecord], sellerRecords, productRecords, lastMessageEntries] = await Promise.all([
-      db()
-        .select()
-        .from(users)
-        .where(eq(users.id, req.user))
-        .limit(1),
-      sellerIds.length
-        ? db().select().from(users).where(inArray(users.id, sellerIds))
-        : Promise.resolve([]),
-      productIds.length
-        ? db().select().from(products).where(inArray(products.id, productIds))
-        : Promise.resolve([]),
+    const [customerRecord, sellerRecords, productRecords, lastMessageEntries] = await Promise.all([
+      queryOne(
+        `
+          SELECT ${USER_COLUMNS}
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [req.user]
+      ),
+      fetchUsersByIds(sellerIds),
+      fetchProductsByIds(productIds),
       Promise.all(
         conversations.map(async (conversation) => ({
           conversationId: conversation.id,
@@ -305,11 +401,15 @@ export const getUserConversationMessages = async (req, res) => {
         .json({ success: false, message: "Invalid conversation id" });
     }
 
-    const [conversation] = await db()
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.id, conversationId))
-      .limit(1);
+    const conversation = await queryOne(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [conversationId]
+    );
 
     if (!conversation || conversation.userId !== req.user) {
       return res
@@ -317,16 +417,24 @@ export const getUserConversationMessages = async (req, res) => {
         .json({ success: false, message: "Conversation not found" });
     }
 
-    const messages = await db()
-      .select()
-      .from(chatMessages)
-      .where(eq(chatMessages.conversationId, conversationId))
-      .orderBy(chatMessages.createdAt);
+    const messages = await queryMany(
+      `
+        SELECT ${MESSAGE_COLUMNS}
+        FROM chat_messages
+        WHERE conversation_id = $1
+        ORDER BY created_at ASC
+      `,
+      [conversationId]
+    );
 
-    await db()
-      .update(chatMessages)
-      .set({ readByUser: true })
-      .where(eq(chatMessages.conversationId, conversationId));
+    await query(
+      `
+        UPDATE chat_messages
+        SET read_by_user = true
+        WHERE conversation_id = $1
+      `,
+      [conversationId]
+    );
 
     const conversationMeta = await loadConversationWithMeta(conversationId);
 
@@ -344,8 +452,9 @@ export const getUserConversationMessages = async (req, res) => {
 export const sendUserMessage = async (req, res) => {
   try {
     const { conversationId, message, productId, sellerId } = req.body;
+    const trimmedMessage = message?.trim();
 
-    if (!message || !message.trim()) {
+    if (!trimmedMessage) {
       return res
         .status(400)
         .json({ success: false, message: "Message body is required" });
@@ -368,11 +477,15 @@ export const sendUserMessage = async (req, res) => {
           .json({ success: false, message: "Invalid conversation id" });
       }
 
-      const [existingConversation] = await db()
-        .select()
-        .from(chatConversations)
-        .where(eq(chatConversations.id, conversationId))
-        .limit(1);
+      const existingConversation = await queryOne(
+        `
+          SELECT ${CONVERSATION_COLUMNS}
+          FROM chat_conversations
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [conversationId]
+      );
 
       if (!existingConversation || existingConversation.userId !== req.user) {
         return res
@@ -384,10 +497,15 @@ export const sendUserMessage = async (req, res) => {
       resolvedSellerId = conversation.sellerId;
       resolvedProductId = conversation.productId;
     } else {
-      const resolution = await resolveSellerAndProduct({
-        sellerId: resolvedSellerId,
-        productId: resolvedProductId,
-      });
+      let resolution;
+      try {
+        resolution = await resolveSellerAndProduct({
+          sellerId: resolvedSellerId,
+          productId: resolvedProductId,
+        });
+      } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
 
       resolvedSellerId = resolution.sellerId;
       resolvedProductId = resolution.productId;
@@ -416,17 +534,21 @@ export const sendUserMessage = async (req, res) => {
         .json({ success: false, message: "Invalid conversation participants" });
     }
 
-    const [newMessage] = await db()
-      .insert(chatMessages)
-      .values({
-        conversationId: conversation.id,
-        senderId: req.user,
-        senderRole: req.userRole,
-        body: message.trim(),
-        readByUser: true,
-        readBySeller: false,
-      })
-      .returning();
+    const newMessage = await queryOne(
+      `
+        INSERT INTO chat_messages (
+          conversation_id,
+          sender_id,
+          sender_role,
+          body,
+          read_by_user,
+          read_by_seller
+        )
+        VALUES ($1, $2, $3, $4, true, false)
+        RETURNING ${MESSAGE_COLUMNS}
+      `,
+      [conversation.id, req.user, req.userRole, trimmedMessage]
+    );
 
     const formattedMessage = formatMessage(newMessage);
 
@@ -452,11 +574,15 @@ export const sendUserMessage = async (req, res) => {
 
 export const listSellerConversations = async (req, res) => {
   try {
-    const conversations = await db()
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.sellerId, req.user))
-      .orderBy(desc(chatConversations.updatedAt));
+    const conversations = await queryMany(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE seller_id = $1
+        ORDER BY updated_at DESC
+      `,
+      [req.user]
+    );
 
     const validConversations = conversations.filter(
       (conversation) => conversation.userId !== conversation.sellerId
@@ -466,22 +592,23 @@ export const listSellerConversations = async (req, res) => {
       return res.json({ success: true, conversations: [] });
     }
 
-    const userIds = [...new Set(validConversations.map((item) => item.userId))];
-    const productIds = [...new Set(validConversations.map((item) => item.productId).filter(Boolean))];
+    const userIds = Array.from(new Set(validConversations.map((item) => item.userId)));
+    const productIds = Array.from(
+      new Set(validConversations.map((item) => item.productId).filter(Boolean))
+    );
 
     const [sellerRecord, customerRecords, productRecords, lastMessageEntries] = await Promise.all([
-      db()
-        .select()
-        .from(users)
-        .where(eq(users.id, req.user))
-        .limit(1)
-        .then((records) => records[0] ?? null),
-      userIds.length
-        ? db().select().from(users).where(inArray(users.id, userIds))
-        : Promise.resolve([]),
-      productIds.length
-        ? db().select().from(products).where(inArray(products.id, productIds))
-        : Promise.resolve([]),
+      queryOne(
+        `
+          SELECT ${USER_COLUMNS}
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [req.user]
+      ),
+      fetchUsersByIds(userIds),
+      fetchProductsByIds(productIds),
       Promise.all(
         validConversations.map(async (conversation) => ({
           conversationId: conversation.id,
@@ -522,11 +649,15 @@ export const getSellerConversationMessages = async (req, res) => {
         .json({ success: false, message: "Invalid conversation id" });
     }
 
-    const [conversation] = await db()
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.id, conversationId))
-      .limit(1);
+    const conversation = await queryOne(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [conversationId]
+    );
 
     if (!conversation || conversation.sellerId !== req.user) {
       return res
@@ -541,16 +672,24 @@ export const getSellerConversationMessages = async (req, res) => {
       });
     }
 
-    const messages = await db()
-      .select()
-      .from(chatMessages)
-      .where(eq(chatMessages.conversationId, conversationId))
-      .orderBy(chatMessages.createdAt);
+    const messages = await queryMany(
+      `
+        SELECT ${MESSAGE_COLUMNS}
+        FROM chat_messages
+        WHERE conversation_id = $1
+        ORDER BY created_at ASC
+      `,
+      [conversationId]
+    );
 
-    await db()
-      .update(chatMessages)
-      .set({ readBySeller: true })
-      .where(eq(chatMessages.conversationId, conversationId));
+    await query(
+      `
+        UPDATE chat_messages
+        SET read_by_seller = true
+        WHERE conversation_id = $1
+      `,
+      [conversationId]
+    );
 
     const conversationMeta = await loadConversationWithMeta(conversationId);
 
@@ -568,8 +707,9 @@ export const getSellerConversationMessages = async (req, res) => {
 export const sendSellerMessage = async (req, res) => {
   try {
     const { conversationId, message } = req.body;
+    const trimmedMessage = message?.trim();
 
-    if (!message || !message.trim()) {
+    if (!trimmedMessage) {
       return res
         .status(400)
         .json({ success: false, message: "Message body is required" });
@@ -581,11 +721,15 @@ export const sendSellerMessage = async (req, res) => {
         .json({ success: false, message: "Conversation id required" });
     }
 
-    const [conversation] = await db()
-      .select()
-      .from(chatConversations)
-      .where(eq(chatConversations.id, conversationId))
-      .limit(1);
+    const conversation = await queryOne(
+      `
+        SELECT ${CONVERSATION_COLUMNS}
+        FROM chat_conversations
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [conversationId]
+    );
 
     if (!conversation || conversation.sellerId !== req.user) {
       return res
@@ -600,17 +744,21 @@ export const sendSellerMessage = async (req, res) => {
       });
     }
 
-    const [newMessage] = await db()
-      .insert(chatMessages)
-      .values({
-        conversationId,
-        senderId: req.user,
-        senderRole: req.userRole,
-        body: message.trim(),
-        readByUser: false,
-        readBySeller: true,
-      })
-      .returning();
+    const newMessage = await queryOne(
+      `
+        INSERT INTO chat_messages (
+          conversation_id,
+          sender_id,
+          sender_role,
+          body,
+          read_by_user,
+          read_by_seller
+        )
+        VALUES ($1, $2, $3, $4, false, true)
+        RETURNING ${MESSAGE_COLUMNS}
+      `,
+      [conversationId, req.user, req.userRole, trimmedMessage]
+    );
 
     const formattedMessage = formatMessage(newMessage);
 

@@ -1,11 +1,7 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
-import { getDb } from "../db/client.js";
-import { users } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { queryOne } from "../db/client.js";
 import { recordTransactionLog } from "../utils/transactionLogger.js";
-
-const db = () => getDb();
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
@@ -28,11 +24,10 @@ export const registerHandler = async (req, res) => {
         .json({ success: false, message: "invalid credentials" });
     }
 
-    const [existedUser] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const existedUser = await queryOne(
+      `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+      [email]
+    );
 
     if (existedUser) {
       return res
@@ -42,10 +37,14 @@ export const registerHandler = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const [createdUser] = await db()
-      .insert(users)
-      .values({ name, email, password: hashedPassword })
-      .returning();
+    const createdUser = await queryOne(
+      `
+        INSERT INTO users (name, email, password)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, email, role, cart_items, is_active
+      `,
+      [name, email, hashedPassword]
+    );
 
     await recordTransactionLog({
       tableName: "users",
@@ -101,11 +100,15 @@ export const loginHandler = async (req, res) => {
         .json({ success: false, message: "Email and Password required" });
     }
 
-    const [user] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+    const user = await queryOne(
+      `
+        SELECT id, name, email, password, role, is_active, cart_items
+        FROM users
+        WHERE email = $1
+        LIMIT 1
+      `,
+      [email]
+    );
 
     if (!user) {
       return res
@@ -156,11 +159,15 @@ export const loginHandler = async (req, res) => {
 
 export const isAuth = async (req, res) => {
   try {
-    const [user] = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, req.user))
-      .limit(1);
+    const user = await queryOne(
+      `
+        SELECT id, name, email, role, is_active, cart_items
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [req.user]
+    );
 
     return res.status(200).json({ success: true, user: sanitizeUser(user) });
   } catch (error) {

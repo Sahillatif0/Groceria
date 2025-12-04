@@ -1,9 +1,6 @@
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
-import { connectDb } from "../config/db.js";
-import { getDb } from "./client.js";
-import { users } from "./schema.js";
-import { eq } from "drizzle-orm";
+import { connectDb, queryOne, query } from "../config/db.js";
 
 dotenv.config();
 
@@ -16,37 +13,42 @@ const seedAdmin = async () => {
   }
 
   await connectDb();
-  const db = getDb();
 
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, ADMIN_EMAIL))
-    .limit(1);
+  const existing = await queryOne(
+    `
+      SELECT id
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+    `,
+    [ADMIN_EMAIL]
+  );
 
   const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 10);
 
   if (existing) {
-    await db
-      .update(users)
-      .set({
-        name: ADMIN_NAME,
-        password: hashedPassword,
-        role: "admin",
-        isActive: true,
-        updatedAt: new Date(),
-      })
-      .where(eq(users.id, existing.id));
+    await query(
+      `
+        UPDATE users
+        SET name = $1,
+            password = $2,
+            role = 'admin',
+            is_active = true,
+            updated_at = NOW()
+        WHERE id = $3
+      `,
+      [ADMIN_NAME, hashedPassword, existing.id]
+    );
 
     console.log(`Updated existing admin user ${ADMIN_EMAIL}`);
   } else {
-    await db.insert(users).values({
-      name: ADMIN_NAME,
-      email: ADMIN_EMAIL,
-      password: hashedPassword,
-      role: "admin",
-      isActive: true,
-    });
+    await query(
+      `
+        INSERT INTO users (name, email, password, role, is_active)
+        VALUES ($1, $2, $3, 'admin', true)
+      `,
+      [ADMIN_NAME, ADMIN_EMAIL, hashedPassword]
+    );
 
     console.log(`Created admin user ${ADMIN_EMAIL}`);
   }
