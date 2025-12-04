@@ -1,15 +1,22 @@
 import jwt from "jsonwebtoken";
+<<<<<<< HEAD
 import { queryOne } from "../db/client.js";
+=======
+import { UserModel } from "../models/index.js";
+>>>>>>> f3a43296fa90500cfcdf6cafabe0669f32899963
 
 const sanitizeUser = (userRecord) => {
   if (!userRecord) {
     return null;
   }
 
-  const { password, ...rest } = userRecord;
+  const payload = userRecord.toObject ? userRecord.toObject() : userRecord;
+  const { password, ...rest } = payload;
+  const id = payload._id?.toString?.() ?? payload.id?.toString?.();
   return {
     ...rest,
-    _id: userRecord.id,
+    _id: id,
+    id,
   };
 };
 
@@ -31,6 +38,7 @@ export const authSeller = async (req, res, next) => {
         .json({ success: false, message: "Invalid token payload" });
     }
 
+<<<<<<< HEAD
     const userRecord = await queryOne(
       `
         SELECT id, name, email, role, is_active
@@ -40,6 +48,9 @@ export const authSeller = async (req, res, next) => {
       `,
       [decoded.id]
     );
+=======
+    const userRecord = await UserModel.findById(decoded.id).lean();
+>>>>>>> f3a43296fa90500cfcdf6cafabe0669f32899963
 
     if (!userRecord || !userRecord.isActive) {
       return res
@@ -53,7 +64,7 @@ export const authSeller = async (req, res, next) => {
         .json({ success: false, message: "Not authorized" });
     }
 
-    req.user = userRecord.id;
+    req.user = userRecord._id.toString();
     req.userRole = userRecord.role;
     req.currentUser = sanitizeUser(userRecord);
 

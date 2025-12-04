@@ -1,8 +1,5 @@
 export {
-	connectDb,
-	getPool,
-	query,
-	queryOne,
-	queryMany,
-	withTransaction,
-} from "../db/client.js";
+	connectMongo as connectDb,
+	disconnectMongo as disconnectDb,
+	getMongoConnection,
+} from "../db/mongoClient.js";
